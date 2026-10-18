@@ -6,7 +6,10 @@ import { sanitizeContent } from "./sanitizer";
 /**
  * Parses simple YAML frontmatter without requiring heavy external YAML parsers.
  */
-export function parseFrontmatter(fileContent: string): { frontmatter: Partial<GitKnowledgeFrontmatter>; body: string } {
+export function parseFrontmatter(fileContent: string): {
+  frontmatter: Partial<GitKnowledgeFrontmatter>;
+  body: string;
+} {
   const match = fileContent.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
   if (!match) {
     return { frontmatter: {}, body: fileContent.trim() };
@@ -193,14 +196,19 @@ export class GitKnowledgeStore {
   /**
    * Searches loaded items by query, target table, or kind.
    */
-  public search(query: string, options: { kind?: KnowledgeKind; targetTable?: string } = {}): GitKnowledgeItem[] {
+  public search(
+    query: string,
+    options: { kind?: KnowledgeKind; targetTable?: string } = {},
+  ): GitKnowledgeItem[] {
     const all = this.loadAll();
     const q = query.toLowerCase().trim();
 
     return all.filter((item) => {
       if (options.kind && item.kind !== options.kind) return false;
       if (options.targetTable) {
-        const hasTable = item.target_tables?.some((t) => t.toLowerCase() === options.targetTable?.toLowerCase());
+        const hasTable = item.target_tables?.some(
+          (t) => t.toLowerCase() === options.targetTable?.toLowerCase(),
+        );
         if (!hasTable) return false;
       }
 

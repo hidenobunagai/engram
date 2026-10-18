@@ -5,6 +5,7 @@
 `engram` is a privacy-first, zero-overhead memory and knowledge base plugin designed for Data Analyst teams using Claude Code.
 
 While software engineers primarily track code structure and dependencies, data analysts face a different set of challenges:
+
 - **Data Caveats (Traps & Quirks)**: Undocumented NULL behavior, historical tracking outages, duplicate records, deleted flag logic.
 - **Metric Definitions**: Discrepancies in KPI calculations (e.g., active user definitions, ARR exclusions, churn window).
 - **Golden Queries**: Hard-won, peer-reviewed SQL snippets with complex window functions or CTEs that shouldn't be reinvented.
@@ -38,11 +39,13 @@ While software engineers primarily track code structure and dependencies, data a
 ```
 
 ### Tier 1: Personal Working Memory (Local SQLite)
+
 - **Zero-ops & Zero-Server**: No background daemon (like a Raspberry Pi or cloud server). Runs embedded using `bun:sqlite` with FTS5 trigram indexing.
 - **Automatic Capture**: Automatically tracks executed queries, script errors, and solutions within the user's local sessions.
 - **Private & Safe**: Never pushed to git. Automatically sanitizes database connection strings, passwords, and API keys before saving.
 
 ### Tier 2: Team Curated Knowledge (Git-backed `.engram/`)
+
 - **Version Controlled**: Stored as human-readable Markdown files with YAML frontmatter inside the repository's `.engram/` directory.
 - **Collaborative Review**: Team members update metrics and data caveats via normal Pull Requests.
 - **Automatic Context Injection**: At the start of every Claude Code session (`session.start`), `engram` scans `.engram/` and injects verified business rules and data traps directly into Claude's prompt context.
@@ -66,7 +69,7 @@ While software engineers primarily track code structure and dependencies, data a
 
 ### Git File Format (`.engram/<kind>/<slug>.md`)
 
-```markdown
+````markdown
 ---
 id: cav-users-deleted-at
 kind: caveat
@@ -78,15 +81,19 @@ tags: ["users", "retention", "joins"]
 ---
 
 ### Problem
+
 `dim_users` contains soft-deleted users where `is_deleted = true` or `deleted_at IS NOT NULL`.
 Joining `dim_users` without filtering out deleted users causes inflated cohort counts.
 
 ### Recommended Pattern
+
 ```sql
 SELECT ...
 FROM dim_users u
 WHERE u.deleted_at IS NULL
 ```
+````
+
 ```
 
 ---
@@ -128,3 +135,4 @@ WHERE u.deleted_at IS NULL
 ### Agent Tools
 - `engram_recall(query, kind?, limit?)`: Agent tool to search data caveats and metrics before executing queries.
 - `engram_save(kind, title, content, tables?, tags?)`: Agent tool to persist a new insight.
+```

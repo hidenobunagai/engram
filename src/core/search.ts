@@ -25,7 +25,10 @@ export class HybridSearchEngine {
 
       // Higher base score for team-reviewed git knowledge
       let score = 100;
-      if (targetTable && item.target_tables?.some((t) => t.toLowerCase() === targetTable.toLowerCase())) {
+      if (
+        targetTable &&
+        item.target_tables?.some((t) => t.toLowerCase() === targetTable.toLowerCase())
+      ) {
         score += 50;
       }
 
@@ -51,7 +54,10 @@ export class HybridSearchEngine {
         if (kinds && !kinds.includes(item.kind as any)) continue;
 
         let score = 50;
-        if (targetTable && item.targetTables?.some((t) => t.toLowerCase() === targetTable.toLowerCase())) {
+        if (
+          targetTable &&
+          item.targetTables?.some((t) => t.toLowerCase() === targetTable.toLowerCase())
+        ) {
           score += 30;
         }
 
@@ -85,7 +91,10 @@ export class HybridSearchEngine {
     if (relevantCaveats.length > 0) {
       lines.push("\n## ⚠️ Known Data Caveats & Table Quirks:");
       for (const c of relevantCaveats.slice(0, 5)) {
-        const tables = c.target_tables && c.target_tables.length > 0 ? ` [Tables: ${c.target_tables.join(", ")}]` : "";
+        const tables =
+          c.target_tables && c.target_tables.length > 0
+            ? ` [Tables: ${c.target_tables.join(", ")}]`
+            : "";
         lines.push(`- **${c.title}**${tables}: ${c.body.split("\n")[0]}`);
       }
     }

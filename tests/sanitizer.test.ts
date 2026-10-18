@@ -5,13 +5,17 @@ describe("sanitizeContent", () => {
   it("redacts postgres connection string passwords", () => {
     const raw = "Connecting to postgresql://myuser:supersecret123@db.prod.internal:5432/analytics";
     const cleaned = sanitizeContent(raw);
-    expect(cleaned).toBe("Connecting to postgresql://myuser:[REDACTED_SECRET]@db.prod.internal:5432/analytics");
+    expect(cleaned).toBe(
+      "Connecting to postgresql://myuser:[REDACTED_SECRET]@db.prod.internal:5432/analytics",
+    );
   });
 
   it("redacts snowflake connection string passwords", () => {
     const raw = "snowflake://analyst:P@ssw0rd!@myaccount.snowflakecomputing.com/ANALYTICS_WH";
     const cleaned = sanitizeContent(raw);
-    expect(cleaned).toBe("snowflake://analyst:[REDACTED_SECRET]@myaccount.snowflakecomputing.com/ANALYTICS_WH");
+    expect(cleaned).toBe(
+      "snowflake://analyst:[REDACTED_SECRET]@myaccount.snowflakecomputing.com/ANALYTICS_WH",
+    );
   });
 
   it("redacts key-value secrets in configuration", () => {
@@ -21,7 +25,8 @@ describe("sanitizeContent", () => {
   });
 
   it("redacts Bearer tokens and JWTs", () => {
-    const jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J_wStmockSignature12345";
+    const jwt =
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J_wStmockSignature12345";
     const raw = `Authorization: Bearer ${jwt}`;
     const cleaned = sanitizeContent(raw);
     expect(cleaned).not.toContain(jwt);

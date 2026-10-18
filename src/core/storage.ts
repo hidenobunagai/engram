@@ -174,12 +174,10 @@ export class LocalStorage {
       startedAt,
     };
 
-    this.db.run(`INSERT OR REPLACE INTO sessions (id, project, cwd, started_at) VALUES (?, ?, ?, ?)`, [
-      fullSession.id,
-      fullSession.project,
-      fullSession.cwd,
-      fullSession.startedAt,
-    ]);
+    this.db.run(
+      `INSERT OR REPLACE INTO sessions (id, project, cwd, started_at) VALUES (?, ?, ?, ?)`,
+      [fullSession.id, fullSession.project, fullSession.cwd, fullSession.startedAt],
+    );
 
     return fullSession;
   }
@@ -191,7 +189,11 @@ export class LocalStorage {
     const endedAt = Date.now();
     const cleanSummary = sanitizeContent(summary);
 
-    this.db.run(`UPDATE sessions SET ended_at = ?, summary = ? WHERE id = ?`, [endedAt, cleanSummary, id]);
+    this.db.run(`UPDATE sessions SET ended_at = ?, summary = ? WHERE id = ?`, [
+      endedAt,
+      cleanSummary,
+      id,
+    ]);
   }
 
   /**
@@ -199,8 +201,17 @@ export class LocalStorage {
    */
   public getRecentSession(project: string): LocalSession | null {
     const row = this.db
-      .query(`SELECT id, project, cwd, started_at, ended_at, summary FROM sessions WHERE project = ? ORDER BY started_at DESC LIMIT 1`)
-      .get(project) as { id: string; project: string; cwd: string; started_at: number; ended_at?: number; summary?: string } | null;
+      .query(
+        `SELECT id, project, cwd, started_at, ended_at, summary FROM sessions WHERE project = ? ORDER BY started_at DESC LIMIT 1`,
+      )
+      .get(project) as {
+      id: string;
+      project: string;
+      cwd: string;
+      started_at: number;
+      ended_at?: number;
+      summary?: string;
+    } | null;
 
     if (!row) return null;
     return {
@@ -285,7 +296,13 @@ export class LocalStorage {
              ORDER BY score ASC
              LIMIT ?`,
           )
-          .all(escaped, limit) as Array<{ id: string; kind: string; title: string; content: string; score: number }>;
+          .all(escaped, limit) as Array<{
+          id: string;
+          kind: string;
+          title: string;
+          content: string;
+          score: number;
+        }>;
 
         if (rows.length > 0) {
           return rows.map((r) => ({

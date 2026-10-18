@@ -7,12 +7,14 @@ const SECRET_PATTERNS: Array<{ name: string; regex: RegExp }> = [
   // Database connection strings: e.g. postgresql://user:pass@host:5432/db
   {
     name: "db_uri",
-    regex: /(?:postgresql|postgres|mysql|snowflake|redshift|bigquery|mongodb|sqlserver):\/\/[^\s:]+:([^\s@]+)@[^\s/]+/gi,
+    regex:
+      /(?:postgresql|postgres|mysql|snowflake|redshift|bigquery|mongodb|sqlserver):\/\/[^\s:]+:([^\s@]+)@[^\s/]+/gi,
   },
   // Key-value password patterns: e.g. password=xyz, pwd: xyz, secret: xyz
   {
     name: "kv_secret",
-    regex: /(?:password|passwd|pwd|secret|api_key|apikey|access_token|private_key)\s*[:=]\s*["']?([^\s"';,]+)["']?/gi,
+    regex:
+      /(?:password|passwd|pwd|secret|api_key|apikey|access_token|private_key)\s*[:=]\s*["']?([^\s"';,]+)["']?/gi,
   },
   // JWT tokens: eyJ...
   {
@@ -68,10 +70,7 @@ export function sanitizeContent(content: string): string {
   );
 
   // Bearer token
-  sanitized = sanitized.replace(
-    /Bearer\s+([a-zA-Z0-9_\-\.~+/]{20,})/gi,
-    "Bearer [REDACTED_TOKEN]",
-  );
+  sanitized = sanitized.replace(/Bearer\s+([a-zA-Z0-9_\-\.~+/]{20,})/gi, "Bearer [REDACTED_TOKEN]");
 
   // AWS Access Key
   sanitized = sanitized.replace(

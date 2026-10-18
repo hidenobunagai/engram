@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
-import { handleCaveatCommand, handleRecallCommand, handleStatusCommand } from "../src/commands/index";
+import {
+  handleCaveatCommand,
+  handleRecallCommand,
+  handleStatusCommand,
+} from "../src/commands/index";
 import { GitKnowledgeStore } from "../src/core/git-store";
 import { HybridSearchEngine } from "../src/core/search";
 import { LocalStorage } from "../src/core/storage";
@@ -41,7 +45,10 @@ describe("Engram Commands", () => {
   });
 
   it("handles caveat command and saves into .engram", async () => {
-    const res = await handleCaveatCommand(ctx, "Users Missing Email | Some social logins lack verified email.");
+    const res = await handleCaveatCommand(
+      ctx,
+      "Users Missing Email | Some social logins lack verified email.",
+    );
     expect(res.message).toContain("Saved new team caveat to");
 
     const status = await handleStatusCommand(ctx);

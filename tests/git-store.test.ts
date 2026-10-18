@@ -1,7 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
-import { GitKnowledgeStore, parseFrontmatter, serializeKnowledge, slugify } from "../src/core/git-store";
+import {
+  GitKnowledgeStore,
+  parseFrontmatter,
+  serializeKnowledge,
+  slugify,
+} from "../src/core/git-store";
 
 const TEST_DIR = join(import.meta.dir, "tmp-git-store");
 
