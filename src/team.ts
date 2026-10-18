@@ -1,11 +1,22 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "fs";
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
 import { homedir } from "os";
 import { dirname, join, resolve } from "path";
 import type { Kind } from "./memory";
-import { projectRoot } from "./memory";
+import { dataDir, projectRoot } from "./memory";
 import { sanitize } from "./sanitizer";
 
-/** Team knowledge: Markdown files with frontmatter in a git repo the team reviews via PRs. */
+/** Team knowledge: Markdown files with frontmatter in a shared folder (network drive or git clone). */
 export interface TeamItem {
   id: string;
   kind: Kind;
@@ -32,21 +43,95 @@ const FOLDER: Record<Kind, string> = {
 };
 
 /**
- * Active team stores, highest priority first: ENGRAM_TEAM_DIR, else the nearest project
- * `.engram/` (up to the repo root) followed by ~/.claude/engram-team.
+ * Personal settings in <data dir>/config.json: the team folder (persisted from the plugin's
+ * `team_dir` option so commands run outside hooks see it too) and the projects the user selected
+ * with `engram scope on`.
  */
-export function teamDirs(cwd: string): string[] {
-  if (process.env.ENGRAM_TEAM_DIR) return [resolve(process.env.ENGRAM_TEAM_DIR)];
-  const dirs: string[] = [];
-  const local = projectStore(cwd);
-  if (local) dirs.push(local);
-  if (existsSync(sharedStore())) dirs.push(sharedStore());
-  return dirs;
+export interface Config {
+  teamDir?: string;
+  /** Selections are per team folder: switching folders does not carry them over. */
+  projects?: Array<{ root: string; remote?: string; team: string }>;
 }
 
-/** The shared team repository: ENGRAM_TEAM_DIR or ~/.claude/engram-team. Holds scope.json. */
-export function sharedStore(): string {
-  return resolve(process.env.ENGRAM_TEAM_DIR || join(homedir(), ".claude", "engram-team"));
+const configFile = () => join(dataDir(), "config.json");
+
+export function readConfig(): Config {
+  try {
+    const c = JSON.parse(readFileSync(configFile(), "utf-8"));
+    return c && typeof c === "object" && !Array.isArray(c) ? c : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Read-modify-write under a lock file, so parallel hooks and commands do not drop each other's
+ * changes (a lost "scope off" would leave a project shared).
+ */
+export function updateConfig(change: (c: Config) => Config): void {
+  const lock = `${configFile()}.lock`;
+  mkdirSync(dataDir(), { recursive: true });
+  const deadline = Date.now() + 3000;
+  for (;;) {
+    try {
+      closeSync(openSync(lock, "wx"));
+      break;
+    } catch {
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > 10_000) unlinkSync(lock); // left by a crashed writer
+      } catch {
+        // Lock vanished between calls: retry.
+      }
+      if (Date.now() > deadline) throw new Error(`config is locked: ${lock}`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+  try {
+    writeAtomic(configFile(), `${JSON.stringify(change(readConfig()), null, 2)}\n`);
+  } finally {
+    unlinkSync(lock);
+  }
+}
+
+function writeAtomic(file: string, text: string): void {
+  mkdirSync(dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, text, "utf-8");
+  renameSync(tmp, file);
+}
+
+/** Plugin hooks get CLAUDE_PLUGIN_ROOT; commands Claude runs through the Bash tool do not. */
+const inPluginHook = () => !!process.env.CLAUDE_PLUGIN_ROOT;
+
+/**
+ * Hooks receive the plugin option; remember it so CLI commands use the same folder. A cleared option
+ * clears the remembered folder too, which turns team sharing off.
+ */
+export function persistPluginOption(): void {
+  if (!inPluginHook()) return;
+  const opt = process.env.CLAUDE_PLUGIN_OPTION_TEAM_DIR?.trim() || undefined;
+  if (opt === readConfig().teamDir) return;
+  updateConfig(({ teamDir, ...rest }) => (opt ? { ...rest, teamDir: opt } : rest));
+}
+
+/**
+ * The shared team folder (a network drive such as S:\\analytics\\engram, or a git clone):
+ * ENGRAM_TEAM_DIR, the plugin's `team_dir` option, config.json, else ~/.claude/engram-team if it
+ * exists. A configured folder is returned without touching it, because it may be slow or offline.
+ */
+export function sharedStore(): string | undefined {
+  // Inside a hook the plugin option is authoritative, even when empty (cleared).
+  const configured =
+    process.env.ENGRAM_TEAM_DIR?.trim() ||
+    (inPluginHook() ? process.env.CLAUDE_PLUGIN_OPTION_TEAM_DIR?.trim() : readConfig().teamDir);
+  if (configured) return resolve(configured);
+  const fallback = join(homedir(), ".claude", "engram-team");
+  return existsSync(fallback) ? fallback : undefined;
+}
+
+/** Active team stores, highest priority first: the project's `.engram/`, then the shared folder. */
+export function teamDirs(cwd: string): string[] {
+  return [projectStore(cwd), sharedStore()].filter((d): d is string => !!d);
 }
 
 /** Nearest `.engram/` between cwd and the repository root. */
@@ -109,22 +194,23 @@ function globMatch(pattern: string, text: string): boolean {
   return new RegExp(`^${re}$`).test(text.toLowerCase());
 }
 
-export interface Scope {
-  inScope: boolean;
-  reason: string;
+/** Forward slashes; case-insensitive on Windows, where C:\\Work and c:\\work are the same folder. */
+export function samePath(a: string, b: string): boolean {
+  const norm = (p: string) => {
+    const s = resolve(p).replace(/\\/g, "/").replace(/\/+$/, "");
+    return process.platform === "win32" ? s.toLowerCase() : s;
+  };
+  return norm(a) === norm(b);
 }
 
-/**
- * Whether team knowledge applies to this project, in both directions: it is injected here, and notes
- * saved here may be shared. In scope when the repo has a `.engram/` folder, when scope.json is
- * absent (not configured), or when its `projects` (git remote) or `paths` patterns match.
- */
-export function teamScope(cwd: string): Scope {
-  if (projectStore(cwd)) return { inScope: true, reason: "project has a .engram/ folder" };
-  const file = join(sharedStore(), "scope.json");
-  if (!existsSync(file))
-    return { inScope: true, reason: "no scope.json in the team store (all projects)" };
-  let cfg: { projects: string[]; paths: string[] };
+interface ScopeFile {
+  projects: string[];
+  paths: string[];
+}
+
+function readScopeFile(base: string): { scope: ScopeFile | null; error?: string } {
+  const file = join(base, "scope.json");
+  if (!existsSync(file)) return { scope: null };
   try {
     const raw = JSON.parse(readFileSync(file, "utf-8"));
     const strings = (v: unknown) =>
@@ -137,27 +223,137 @@ export function teamScope(cwd: string): Scope {
       !strings(raw.paths)
     )
       throw new Error('expected {"projects": [strings], "paths": [strings]}');
-    cfg = { projects: raw.projects || [], paths: raw.paths || [] };
+    return { scope: { projects: raw.projects || [], paths: raw.paths || [] } };
   } catch (e) {
-    return { inScope: false, reason: `scope.json is invalid: ${(e as Error).message}` };
+    return { scope: null, error: `scope.json is invalid: ${(e as Error).message}` };
   }
+}
+
+/**
+ * Local copy of the shared folder (scope.json plus parsed items) so prompt-time hooks never wait on a
+ * network drive. Refreshed by async hooks and by commands that read the folder on purpose.
+ */
+export interface Snapshot {
+  dir: string;
+  at: number;
+  scope: ScopeFile | null;
+  scopeError?: string;
+  items: TeamItem[];
+  skipped: Array<{ path: string; reason: string }>;
+}
+
+const snapshotFile = () => join(dataDir(), "team-snapshot.json");
+
+export function readSnapshot(): Snapshot | null {
+  const dir = sharedStore();
+  if (!dir) return null;
+  try {
+    const snap = JSON.parse(readFileSync(snapshotFile(), "utf-8")) as Snapshot;
+    return samePath(snap.dir, dir) ? snap : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Re-reads the shared folder unless the snapshot is younger than `maxAgeMs`. A lock file keeps hung
+ * refreshes (an offline share) from piling up. Returns the previous snapshot if the folder is
+ * unreachable, plus the error.
+ */
+export function refreshSnapshot(maxAgeMs = 0): { snap: Snapshot | null; error?: string } {
+  const dir = sharedStore();
+  if (!dir) return { snap: null };
+  const prev = readSnapshot();
+  if (prev && Date.now() - prev.at < maxAgeMs) return { snap: prev };
+  const lock = `${snapshotFile()}.lock`;
+  try {
+    if (maxAgeMs > 0 && Date.now() - statSync(lock).mtimeMs < 120_000) return { snap: prev };
+  } catch {
+    // No lock: go ahead.
+  }
+  mkdirSync(dataDir(), { recursive: true });
+  writeFileSync(lock, String(process.pid));
+  try {
+    if (!existsSync(dir)) return { snap: prev, error: `team folder not reachable: ${dir}` };
+    const { scope, error } = readScopeFile(dir);
+    const snap: Snapshot = { dir, at: Date.now(), scope, ...scanStore(dir) };
+    if (error) snap.scopeError = error;
+    writeAtomic(snapshotFile(), JSON.stringify(snap));
+    return { snap };
+  } catch (e) {
+    return { snap: prev, error: (e as Error).message };
+  } finally {
+    try {
+      unlinkSync(lock);
+    } catch {
+      // Already gone.
+    }
+  }
+}
+
+export interface Scope {
+  inScope: boolean;
+  reason: string;
+}
+
+/**
+ * Whether team knowledge applies to this project, in both directions: it is injected here, and notes
+ * saved here may be shared. In scope when the project has a `.engram/` folder, when no team folder is
+ * configured (nothing to share with), when the user selected it (`engram scope on`), or when the
+ * team's scope.json lists its git remote or path. Everything else is out, so personal sessions stay
+ * personal. Reads only local files and the snapshot.
+ */
+export function teamScope(cwd: string): Scope {
+  if (projectStore(cwd)) return { inScope: true, reason: "project has a .engram/ folder" };
+  if (!sharedStore()) return { inScope: true, reason: "no team folder configured" };
   const root = projectRoot(cwd);
   const remote = gitRemote(root);
   const norm = remote ? normalizeRemote(remote) : "";
-  const hitProject = norm
-    ? cfg.projects.find((p) => globMatch(normalizeRemote(p), norm))
-    : undefined;
-  if (hitProject) return { inScope: true, reason: `remote ${norm} matches "${hitProject}"` };
+  const team = sharedStore()!;
+  const picked = (readConfig().projects || []).find(
+    (p) =>
+      !!p.team &&
+      samePath(p.team, team) &&
+      (samePath(p.root, root) || (!!norm && p.remote === norm)),
+  );
+  if (picked) return { inScope: true, reason: "selected with /engram:scope on" };
+  const snap = readSnapshot();
+  if (snap?.scopeError) return { inScope: false, reason: snap.scopeError };
+  const cfg = snap?.scope;
+  const hitProject =
+    cfg && norm ? cfg.projects.find((p) => globMatch(normalizeRemote(p), norm)) : undefined;
+  if (hitProject)
+    return { inScope: true, reason: `remote ${norm} matches "${hitProject}" in scope.json` };
   const path = root.replace(/\\/g, "/");
   const home = homedir().replace(/\\/g, "/");
-  const hitPath = cfg.paths.find((p) =>
+  const hitPath = cfg?.paths.find((p) =>
     globMatch(p.replace(/\\/g, "/").replace(/^~(?=\/|$)/, home), path),
   );
-  if (hitPath) return { inScope: true, reason: `path ${path} matches "${hitPath}"` };
+  if (hitPath) return { inScope: true, reason: `path ${path} matches "${hitPath}" in scope.json` };
   return {
     inScope: false,
-    reason: `not listed in scope.json (remote: ${norm || "none"}, path: ${path})`,
+    reason: `not selected (remote: ${norm || "none"}, path: ${path}); run /engram:scope on here to include it`,
   };
+}
+
+/** Adds or removes the current project from the user's selection for the current team folder. */
+export function setSelected(cwd: string, on: boolean): void {
+  const team = sharedStore();
+  if (!team) throw new Error("No team folder configured, so there is nothing to select for.");
+  const root = projectRoot(cwd);
+  const remote = gitRemote(root);
+  const norm = remote ? normalizeRemote(remote) : undefined;
+  updateConfig((c) => {
+    const rest = (c.projects || []).filter(
+      (p) =>
+        !(
+          samePath(p.team || "", team) &&
+          (samePath(p.root, root) || (!!norm && p.remote === norm))
+        ),
+    );
+    const entry = norm ? { root, remote: norm, team } : { root, team };
+    return { ...c, projects: on ? [...rest, entry] : rest };
+  });
 }
 
 /** Minimal YAML subset: `key: scalar`, `key: [a, "b"]`, and block lists (`key:` then `- a`). */
@@ -230,48 +426,62 @@ export interface LoadResult {
   skipped: Array<{ path: string; reason: string }>;
 }
 
-/** Loads every store (nothing outside the team scope); a higher-priority store overrides the same id. */
-export function loadTeam(cwd: string): LoadResult {
-  const byId = new Map<string, TeamItem>();
+/** Parses every item of one store. */
+function scanStore(base: string): { items: TeamItem[]; skipped: LoadResult["skipped"] } {
+  const items: TeamItem[] = [];
   const skipped: LoadResult["skipped"] = [];
-  if (!teamScope(cwd).inScope) return { items: [], skipped };
-  for (const base of [...teamDirs(cwd)].reverse()) {
-    for (const kind of TEAM_KINDS) {
-      const dir = join(base, FOLDER[kind]);
-      if (!existsSync(dir)) continue;
-      for (const f of readdirSync(dir)) {
-        if (!f.endsWith(".md")) continue;
-        const path = join(dir, f);
-        try {
-          const { meta, body } = parseFrontmatter(readFileSync(path, "utf-8"));
-          const id = asText(meta.id);
-          const title = asText(meta.title);
-          if (!id || !title) {
-            skipped.push({ path, reason: "missing id or title in frontmatter" });
-            continue;
-          }
-          byId.set(id, {
-            id,
-            kind: (TEAM_KINDS as string[]).includes(asText(meta.kind) || "")
-              ? (asText(meta.kind) as Kind)
-              : kind,
-            title,
-            summary: asText(meta.summary),
-            tables: asList(meta.target_tables ?? meta.tables),
-            tags: asList(meta.tags),
-            author: asText(meta.author),
-            status: asText(meta.status),
-            created_at: asText(meta.created_at),
-            body,
-            path,
-          });
-        } catch (e) {
-          skipped.push({ path, reason: (e as Error).message });
+  for (const kind of TEAM_KINDS) {
+    const dir = join(base, FOLDER[kind]);
+    if (!existsSync(dir)) continue;
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith(".md")) continue;
+      const path = join(dir, f);
+      try {
+        const { meta, body } = parseFrontmatter(readFileSync(path, "utf-8"));
+        const id = asText(meta.id);
+        const title = asText(meta.title);
+        if (!id || !title) {
+          skipped.push({ path, reason: "missing id or title in frontmatter" });
+          continue;
         }
+        items.push({
+          id,
+          kind: (TEAM_KINDS as string[]).includes(asText(meta.kind) || "")
+            ? (asText(meta.kind) as Kind)
+            : kind,
+          title,
+          summary: asText(meta.summary),
+          tables: asList(meta.target_tables ?? meta.tables),
+          tags: asList(meta.tags),
+          author: asText(meta.author),
+          status: asText(meta.status),
+          created_at: asText(meta.created_at),
+          body,
+          path,
+        });
+      } catch (e) {
+        skipped.push({ path, reason: (e as Error).message });
       }
     }
   }
-  return { items: [...byId.values()].filter((i) => i.status !== "deprecated"), skipped };
+  return { items, skipped };
+}
+
+/**
+ * Team items for this project: nothing outside the team scope; otherwise the shared folder (from the
+ * snapshot) overridden by the project's `.engram/` (read directly, it is local) for the same id.
+ */
+export function loadTeam(cwd: string): LoadResult {
+  if (!teamScope(cwd).inScope) return { items: [], skipped: [] };
+  const shared = readSnapshot();
+  const local = projectStore(cwd);
+  const own = local ? scanStore(local) : { items: [], skipped: [] };
+  const byId = new Map<string, TeamItem>();
+  for (const i of [...(shared?.items || []), ...own.items]) byId.set(i.id, i);
+  return {
+    items: [...byId.values()].filter((i) => i.status !== "deprecated"),
+    skipped: [...(shared?.skipped || []), ...own.skipped],
+  };
 }
 
 /** First meaningful line of the body when no `summary:` is given. */
@@ -309,9 +519,20 @@ export function serialize(item: Omit<TeamItem, "path">): string {
 
 /**
  * Writes a new team file. Never overwrites: an existing file with another id gets a suffix.
- * Returns the path; committing and opening a PR is left to the user.
+ * Returns the path. In a shared folder the file is visible to the team immediately.
  */
-export function writeTeamItem(base: string, item: Omit<TeamItem, "path">): string {
+export interface TeamWrite {
+  path: string;
+  text: string;
+  /** Current content when a file for this id already exists. */
+  existing?: string;
+}
+
+/**
+ * Where an item would be written: the file that already holds its id, else a new slug file that never
+ * replaces another item (a suffix is added instead).
+ */
+export function planTeamWrite(base: string, item: Omit<TeamItem, "path">): TeamWrite {
   const clean: Omit<TeamItem, "path"> = {
     ...item,
     title: sanitize(item.title),
@@ -321,13 +542,22 @@ export function writeTeamItem(base: string, item: Omit<TeamItem, "path">): strin
     tags: item.tags.map(sanitize),
   };
   const dir = join(base, FOLDER[clean.kind]);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const text = serialize(clean);
+  const files = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".md")) : [];
+  for (const f of files) {
+    const content = readFileSync(join(dir, f), "utf-8");
+    if (parseFrontmatter(content).meta.id === clean.id)
+      return { path: join(dir, f), text, existing: content };
+  }
   const stem = slugify(clean.title) || clean.id;
   let path = join(dir, `${stem}.md`);
-  for (let n = 2; existsSync(path); n++) {
-    if (parseFrontmatter(readFileSync(path, "utf-8")).meta.id === clean.id) break;
-    path = join(dir, `${stem}-${n}.md`);
-  }
-  writeFileSync(path, serialize(clean), "utf-8");
-  return path;
+  for (let n = 2; existsSync(path); n++) path = join(dir, `${stem}-${n}.md`);
+  return { path, text };
+}
+
+export function writeTeamItem(base: string, item: Omit<TeamItem, "path">): string {
+  const plan = planTeamWrite(base, item);
+  mkdirSync(dirname(plan.path), { recursive: true });
+  writeFileSync(plan.path, plan.text, "utf-8");
+  return plan.path;
 }

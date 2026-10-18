@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { mkdirSync, writeFileSync } from "fs";
+import { mkdirSync, renameSync, writeFileSync } from "fs";
 import { join } from "path";
 import { onPrompt, onSessionStart } from "../src/hooks";
-import { normalizeRemote, teamScope } from "../src/team";
+import { normalizeRemote, refreshSnapshot, setSelected, teamScope } from "../src/team";
 import { sandbox } from "./helpers";
 
 /** A fake repo whose .git/config has the given origin URL. */
@@ -24,6 +24,7 @@ function team(scope?: object) {
     '---\nid: c1\ntitle: Soft deletes in dim_users\ntarget_tables: ["dim_users"]\n---\nFilter deleted_at IS NULL.',
   );
   if (scope) writeFileSync(join(t, "scope.json"), JSON.stringify(scope));
+  refreshSnapshot(0);
 }
 
 const ev = (cwd: string, extra: object) => ({ session_id: "s1", cwd, ...extra }) as any;
@@ -37,10 +38,38 @@ describe("team scope", () => {
     expect(normalizeRemote("https://user:tok@github.com/a/b/")).toBe("github.com/a/b");
   });
 
-  it("treats every project as in scope until scope.json exists", () => {
+  it("keeps every project out until it is selected, once a team folder exists", () => {
     const { work } = sandbox();
     team();
-    expect(teamScope(repo(work, "dotfiles", "git@github.com:me/dotfiles.git")).inScope).toBe(true);
+    const dot = repo(work, "dotfiles", "git@github.com:me/dotfiles.git");
+    const kpi = repo(work, "kpi", "git@github.com:acme-analytics/kpi.git");
+    expect(teamScope(dot).inScope).toBe(false);
+    setSelected(kpi, true);
+    expect(teamScope(kpi)).toMatchObject({
+      inScope: true,
+      reason: "selected with /engram:scope on",
+    });
+    // A second clone of the same remote counts as the same project.
+    expect(teamScope(repo(work, "kpi-copy", "https://github.com/acme-analytics/kpi")).inScope).toBe(
+      true,
+    );
+    setSelected(kpi, false);
+    expect(teamScope(kpi).inScope).toBe(false);
+    expect(teamScope(dot).inScope).toBe(false);
+  });
+
+  it("keeps working from the snapshot when the team folder goes offline", () => {
+    const { work } = sandbox();
+    team();
+    const kpi = repo(work, "kpi", "git@github.com:acme-analytics/kpi.git");
+    setSelected(kpi, true);
+    refreshSnapshot(0);
+    renameSync(process.env.ENGRAM_TEAM_DIR!, `${process.env.ENGRAM_TEAM_DIR}-offline`);
+    expect(onSessionStart(ev(kpi, { source: "startup" }))).toContain("Soft deletes in dim_users");
+    expect(onPrompt(ev(kpi, { session_id: "s2", prompt: "dim_users の件数を出して" }))).toContain(
+      "Soft deletes in dim_users",
+    );
+    expect(refreshSnapshot(0).error).toContain("not reachable");
   });
 
   it("matches analysis repos by remote or path and keeps others out", () => {
@@ -91,7 +120,8 @@ describe("scope review regressions", () => {
     for (const bad of ["null", '{"projects":"github.com/*"}', '{"projects":[null]}', "[]"]) {
       team();
       writeFileSync(join(process.env.ENGRAM_TEAM_DIR!, "scope.json"), bad);
-      expect(teamScope(r)).toMatchObject({ inScope: false });
+      refreshSnapshot(0);
+      expect(teamScope(r).reason).toContain("scope.json is invalid");
       expect(onSessionStart(ev(r, { source: "startup" }))).toContain("personal memory");
     }
   });

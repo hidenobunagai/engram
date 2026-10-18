@@ -17,9 +17,9 @@ If you want, you can promote a memory into a Markdown file that your team review
 - **Session recap and history**: a new session starts with what the previous session in the same
   repository was about and the latest notes saved there. `/engram:history` lists past sessions and
   shows what happened in one session or on one day.
-- **Team sharing (optional, scoped)**: `/engram:share` writes a note as Markdown into a team git
-  repository, and teammates' sessions get an index of those files. A `scope.json` limits both
-  directions to your analysis projects, so a session about your own PC setup is never shared and never
+- **Team sharing (optional, scoped)**: `/engram:share` publishes a note as Markdown into a shared
+  folder (a network drive or a git clone), and teammates' sessions get an index of those files. Only
+  the projects you select take part, so a session about your own PC setup is never shared and never
   sees team knowledge.
 - **No runtime dependencies**: one bundled `dist/cli.mjs` running on Node.js 18 or newer. No npm
   install, no native modules, no server.
@@ -40,13 +40,14 @@ Or, inside Claude Code: `/plugin marketplace add hidenobunagai/engram`, then `/p
 
 ## Commands
 
-| Command                      | What it does                                                                             |
-| ---------------------------- | ---------------------------------------------------------------------------------------- |
-| `/engram:recall <words>`     | Search memory and team knowledge                                                         |
-| `/engram:save <finding>`     | Save a caveat, metric definition, query, decision, fact or fix                           |
-| `/engram:share [note-id]`    | List shareable notes, or write one as a team Markdown file (you commit it and open a PR) |
-| `/engram:history [id\|date]` | List past sessions (`--all` for every project), or show one session's or day's timeline  |
-| `/engram:status`             | Show what is stored, the team scope of this project, and any invalid team files          |
+| Command                      | What it does                                                                            |
+| ---------------------------- | --------------------------------------------------------------------------------------- |
+| `/engram:recall <words>`     | Search memory and team knowledge                                                        |
+| `/engram:save <finding>`     | Save a caveat, metric definition, query, decision, fact or fix                          |
+| `/engram:share [note-id]`    | List shareable notes, preview one, and publish it to the team folder after you confirm  |
+| `/engram:scope [on\|off]`    | Show, select or unselect this project for team sharing                                  |
+| `/engram:history [id\|date]` | List past sessions (`--all` for every project), or show one session's or day's timeline |
+| `/engram:status`             | Show what is stored, the team scope of this project, and any invalid team files         |
 
 Claude can call `recall` and `save` on its own when they fit, for example before writing SQL against a
 table it saw fail earlier.
@@ -84,39 +85,58 @@ Set `ENGRAM_DISABLE_CAPTURE=1` to stop recording while keeping recall.
 
 ## Team knowledge (optional)
 
-engram reads team Markdown files from the first of:
+Team knowledge is a folder of Markdown files that everyone can read: a shared network drive, or a git
+clone if your team prefers pull requests.
 
-1. `ENGRAM_TEAM_DIR`, if set (only this store is used)
-2. the nearest `.engram/` folder between the current directory and the repository root, plus
-   `~/.claude/engram-team/` if that exists
+### 1. Point engram at the shared folder
 
-A common setup is one shared repository cloned to `~/.claude/engram-team`:
+In Claude Code, run `/plugin`, open engram and set **Team folder**, for example `S:\analytics\engram`
+or `\\fileserver\analytics\engram`. From a terminal:
 
 ```bash
-git clone git@github.com:your-company/analytics-knowledge.git ~/.claude/engram-team
+echo '{"team_dir": "S:\\analytics\\engram"}' | claude plugin configure engram@engram-marketplace --values-stdin
 ```
 
-engram does not pull for you. Run `git pull` there now and then, or schedule it.
+engram remembers the folder in its data dir, so commands run outside hooks use it too. `ENGRAM_TEAM_DIR`
+overrides it. Without a configured folder, `~/.claude/engram-team` is used if it exists.
 
-### Limit team knowledge to analysis projects
+### 2. Choose which projects take part
 
-Put a `scope.json` at the root of the team repository:
+Once a team folder exists, a project is out of the team scope until you pick it. Run this inside a
+project:
+
+```
+/engram:scope on      # include this project (its folder, and other clones of the same git remote)
+/engram:scope off     # take it out again
+/engram:scope         # show the verdict and the reason
+```
+
+A project is also in scope when it has a `.engram/` folder, or when the team folder's optional
+`scope.json` lists it:
 
 ```json
-{
-  "projects": ["github.com/acme-analytics/*", "*/dbt-*"],
-  "paths": ["~/analysis/*"]
-}
+{ "projects": ["github.com/acme-analytics/*"], "paths": ["~/analysis/*"] }
 ```
 
-- `projects` match the repository's git remote (`git@github.com:acme-analytics/kpi.git` is compared as
-  `github.com/acme-analytics/kpi`). `paths` match the project folder. `*` matches anything.
-- A repository with its own `.engram/` folder is always in scope.
-- Without `scope.json`, every project is in scope.
+`projects` match the git remote (`git@github.com:acme-analytics/kpi.git` is compared as
+`github.com/acme-analytics/kpi`), `paths` match the project folder, and `*` matches anything.
 
-In scope, team knowledge is injected and notes saved there can be shared. Out of scope, nothing from
-the team store is injected, and notes saved there stay personal: `/engram:share` refuses them.
-`/engram:status` shows whether the current project is in scope and why.
+In scope, team knowledge is injected and notes saved there can be shared. Out of scope (for example a
+session about your PC setup), nothing from the team folder is injected and `/engram:share` refuses the
+notes saved there.
+
+### 3. Share
+
+`/engram:share` lists notes you can share. `/engram:share <id>` shows a preview, and the file is written
+to the team folder only after you confirm (`--yes`). Teammates see it from their next session. In a
+git-backed folder, commit and push as usual.
+
+### Slow or offline network drives
+
+Prompt-time hooks never read the team folder. They use a local snapshot of it, which background hooks
+refresh at session start and after each reply (at most every 10 minutes). If the drive is offline,
+engram keeps using the last snapshot. `/engram:status`, `/engram:scope` and `/engram:share` read the
+folder directly and report it when it cannot be reached.
 
 Layout and format (see `examples/team/`):
 

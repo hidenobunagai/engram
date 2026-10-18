@@ -10,7 +10,7 @@ import {
   onToolUse,
 } from "../src/hooks";
 import { allNotes, forget, projectId, projectObservations, saveNote } from "../src/memory";
-import { sandbox } from "./helpers";
+import { joinTeam, sandbox } from "./helpers";
 
 const ev = (work: string, session: string, extra: object) =>
   ({ session_id: session, cwd: work, ...extra }) as any;
@@ -109,6 +109,7 @@ describe("hooks", () => {
       join(team, "caveats", "a.md"),
       '---\nid: c1\ntitle: Soft deletes\ntarget_tables: ["dim_users"]\n---\n### Problem\nDeleted users stay in the table.',
     );
+    joinTeam(work);
     expect(onSessionStart(ev(work, "s1", { source: "startup" }))).toContain(
       "caveat: Soft deletes [dim_users] — Deleted users stay in the table.",
     );
@@ -220,6 +221,7 @@ describe("review regressions", () => {
     const team = process.env.ENGRAM_TEAM_DIR!;
     mkdirSync(join(team, "caveats"), { recursive: true });
     writeFileSync(join(team, "caveats", "bad.md"), "no frontmatter");
+    joinTeam(work);
     expect(onSessionStart(ev(work, "s1", { source: "startup" }))).toMatch(
       /^engram: 1 team file\(s\) skipped/,
     );

@@ -15,16 +15,16 @@ relevant. Sharing with the team is a secondary, opt-in step.
 
 ## Components
 
-| Path               | Role                                                                                                           |
-| ------------------ | -------------------------------------------------------------------------------------------------------------- |
-| `src/cli.ts`       | Entry point for hooks (`hook <event>`) and commands (`recall`, `save`, `forget`, `share`, `history`, `status`) |
-| `src/hooks.ts`     | Capture, error → fix pairing, prompt-time recall, session-start recap and team index                           |
-| `src/memory.ts`    | JSONL storage, project ids, retention                                                                          |
-| `src/search.ts`    | Tokenizer and BM25 ranking                                                                                     |
-| `src/team.ts`      | Team Markdown store: discovery, scope, frontmatter parsing, safe writes                                        |
-| `src/sanitizer.ts` | Secret and email redaction applied to everything written                                                       |
-| `skills/*`         | `/engram:recall`, `/engram:save`, `/engram:share`, `/engram:history`, `/engram:status`                         |
-| `dist/cli.mjs`     | Bundled build that hooks and skills run (committed)                                                            |
+| Path               | Role                                                                                                                    |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `src/cli.ts`       | Entry point for hooks (`hook <event>`) and commands (`recall`, `save`, `forget`, `share`, `scope`, `history`, `status`) |
+| `src/hooks.ts`     | Capture, error → fix pairing, prompt-time recall, session-start recap and team index                                    |
+| `src/memory.ts`    | JSONL storage, project ids, retention                                                                                   |
+| `src/search.ts`    | Tokenizer and BM25 ranking                                                                                              |
+| `src/team.ts`      | Team Markdown store: discovery, scope, frontmatter parsing, safe writes                                                 |
+| `src/sanitizer.ts` | Secret and email redaction applied to everything written                                                                |
+| `skills/*`         | `/engram:recall`, `/engram:save`, `/engram:share`, `/engram:scope`, `/engram:history`, `/engram:status`                 |
+| `dist/cli.mjs`     | Bundled build that hooks and skills run (committed)                                                                     |
 
 ## Hooks
 
@@ -34,7 +34,8 @@ relevant. Sharing with the team is a secondary, opt-in step.
 | `UserPromptSubmit`   | sync  | Search memory with the prompt and print up to 5 matches within 1.5 KB; record the prompt and update the recap                                                                                                                                                                                                                                                                                                                                                                                        |
 | `PostToolUse`        | async | For `Bash`, file-writing tools and `mcp__*` tools, record the command (Bash); `<tool> <path>` plus the written text for code files (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`; notebooks keep cell source only, and delimited-data text or a `.sql` file without SQL keeps the path only); or the `sql`/`query`/`statement`/`command` string fields of the input (MCP; calls without one are skipped). Commands whose every chained segment is trivial (`ls`, `cat`, `git status`, …) are skipped |
 | `PostToolUseFailure` | async | Same, plus the error text (head and tail kept, 1,000 characters at most)                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `Stop`               | async | Store Claude's last reply in the recap                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `SessionStart` (2nd) | async | Refresh the team snapshot (TTL 10 minutes) and persist the `team_dir` option                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `Stop`               | async | Store Claude's last reply in the recap; refresh the team snapshot                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 Plain stdout is used for injection because it works for both `SessionStart` and `UserPromptSubmit`.
 Injected text is phrased as factual statements.
@@ -84,19 +85,43 @@ present in the corpus)`. It leaves out the current session and past prompts, and
 
 ## Team store
 
-- Discovery: `ENGRAM_TEAM_DIR` alone, or else the nearest `.engram/` up to the git root plus
-  `~/.claude/engram-team/`. A higher-priority store overrides items with the same `id`.
-- Folders: `caveats metrics queries decisions facts fixes notes`.
+- Folders: the project's nearest `.engram/` (up to the git root) and the shared folder, in that
+  priority. The shared folder is `ENGRAM_TEAM_DIR`, else, inside plugin hooks
+  (`CLAUDE_PLUGIN_ROOT` set), the plugin option `team_dir` (`CLAUDE_PLUGIN_OPTION_TEAM_DIR`; empty means
+  none), else `config.json`'s `teamDir`, else `~/.claude/engram-team` if it exists. Hooks persist the
+  option to `config.json` (and remove it when cleared) so CLI commands run through the Bash tool, which
+  lacks the variable, see the same folder. `config.json` is updated under a lock file.
+- Snapshot: `<data dir>/team-snapshot.json` holds the shared folder's `scope.json` and parsed items.
+  Sync hooks (`SessionStart`, `UserPromptSubmit`) read only the snapshot and the local `.engram/`, so a
+  slow or offline network drive never delays a prompt. Async `SessionStart` and `Stop` refresh it when
+  older than 10 minutes, guarded by a lock file (2 minutes) and written with tmp + rename. `status`,
+  `scope` and `share` refresh it unconditionally and report an unreachable folder. Because sync hooks
+  trust the snapshot, a `scope.json` change reaches prompts after the next refresh (up to 10 minutes,
+  or longer while the folder is offline).
+- Scope, checked in this order:
+  1. the project has a `.engram/` folder: in scope;
+  2. no shared folder is configured: in scope (there is nothing to share with);
+  3. the user selected the project for the current shared folder (`scope on` stores
+     `{root, remote, team}` in `config.json`; a clone with the same remote also counts; switching
+     folders does not carry selections over): in scope;
+  4. the snapshot's `scope.json` lists the normalized origin remote (`projects`) or the project root
+     (`paths`; `*` globs, `~` expanded): in scope;
+  5. otherwise: out of scope.
+
+  An invalid `scope.json` shape is reported and counts as no match. Out of scope, `loadTeam` returns
+  nothing (no injection, no team recall), and `share` refuses notes whose `root` is out of scope. The
+  scope is re-checked at share time, so a note without `root`, or from a project that is not selected,
+  is not shareable.
+
+- Folders inside a store: `caveats metrics queries decisions facts fixes notes`.
 - Frontmatter: `id`, `title` (both required), plus `kind`, `summary`, `target_tables`, `tags`, `author`,
   `status`, `created_at`. Lists may be inline, block or a single scalar. Files with `status: deprecated`
   are hidden.
-- Scope: in scope when the project has a `.engram/` folder, when `<shared store>/scope.json` is absent,
-  or when its `projects` globs match the normalized origin remote (read from `.git/config`, worktrees
-  via `commondir`) or its `paths` globs match the project root. Out of scope, `loadTeam` returns
-  nothing (no injection, no team recall) and `share` refuses notes whose `root` is out of scope; scope is re-checked at share time, so a note
-  saved before `scope.json` existed, or without `root`, is not shareable.
-- `share` without an id lists in-scope notes not yet in the team store. `share <id>` writes a JSON-quoted frontmatter that round-trips safely. If a different item already uses
-  the same file name, `share` adds a suffix instead of overwriting it. Committing is left to the user.
+- `share` without an id lists in-scope notes not yet in the team store. `share <id>` prints a preview.
+  `share <id> --yes` writes JSON-quoted frontmatter to the shared folder (else the project `.engram/`,
+  which only accepts that project's own notes, or `--to DIR`) and refreshes the snapshot. It reuses the
+  file that already holds the id, refuses to replace one whose content differs unless `--update` is
+  given, and never overwrites another item (new files get a suffix on name clashes).
 
 ## History
 

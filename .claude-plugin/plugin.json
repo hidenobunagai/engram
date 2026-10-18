@@ -6,5 +6,13 @@
     "name": "hidenobunagai",
     "url": "https://github.com/hidenobunagai"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "userConfig": {
+    "team_dir": {
+      "type": "directory",
+      "title": "Team folder",
+      "description": "Shared folder for team knowledge, e.g. a network drive like S:\\analytics\\engram or \\\\fileserver\\analytics\\engram. Leave empty to keep everything personal.",
+      "required": false
+    }
+  }
 }

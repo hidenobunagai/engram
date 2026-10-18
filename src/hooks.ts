@@ -15,7 +15,15 @@ import {
   updateRecap,
 } from "./memory";
 import { type Doc, type Hit, search, tokenize } from "./search";
-import { type TeamItem, loadTeam, summaryOf } from "./team";
+import {
+  type TeamItem,
+  loadTeam,
+  persistPluginOption,
+  refreshSnapshot,
+  summaryOf,
+  sharedStore,
+  teamScope,
+} from "./team";
 
 /** Fields Claude Code sends on stdin (see tests/fixtures for real payloads). */
 export interface HookInput {
@@ -213,8 +221,23 @@ export function onToolUse(input: HookInput): void {
 }
 
 export function onStop(input: HookInput): void {
-  if (!input.last_assistant_message) return;
-  updateRecap(projectId(input.cwd), input.session_id, { lastReply: input.last_assistant_message });
+  if (input.last_assistant_message)
+    updateRecap(projectId(input.cwd), input.session_id, {
+      lastReply: input.last_assistant_message,
+    });
+  onRefresh();
+}
+
+const SNAPSHOT_TTL = 10 * 60_000;
+
+/** Async only: the shared folder may be a slow or offline network drive. */
+export function onRefresh(): void {
+  try {
+    persistPluginOption();
+  } catch {
+    // Keep the old setting; the refresh below still helps.
+  }
+  refreshSnapshot(SNAPSHOT_TTL);
 }
 
 /**
@@ -389,6 +412,11 @@ function teamIndex(items: TeamItem[], skipped: number, budget: number): string {
 
 export function onSessionStart(input: HookInput): string {
   try {
+    persistPluginOption();
+  } catch {
+    // A read-only data dir must not cost the recap and index below.
+  }
+  try {
     pruneObservations(RETENTION_DAYS, input.session_id);
   } catch {
     // Pruning is housekeeping; the recap and index below matter more.
@@ -407,6 +435,10 @@ export function onSessionStart(input: HookInput): string {
   }
 
   const { items, skipped } = loadTeam(input.cwd);
+  if (sharedStore() && !teamScope(input.cwd).inScope)
+    parts.push(
+      "engram: a team folder is set, but this project is not selected, so it stays personal. /engram:scope on includes it.",
+    );
   const index = teamIndex(items, skipped.length, SESSION_BUDGET - parts.join("\n").length - 300);
   if (index) parts.push(index);
 
