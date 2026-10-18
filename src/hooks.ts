@@ -15,7 +15,7 @@ import {
   updateRecap,
 } from "./memory";
 import { type Doc, type Hit, search, tokenize } from "./search";
-import { type TeamItem, loadTeam, summaryOf } from "./team";
+import { type TeamItem, loadTeam, persistPluginOption, refreshSnapshot, summaryOf } from "./team";
 
 /** Fields Claude Code sends on stdin (see tests/fixtures for real payloads). */
 export interface HookInput {
@@ -213,8 +213,19 @@ export function onToolUse(input: HookInput): void {
 }
 
 export function onStop(input: HookInput): void {
-  if (!input.last_assistant_message) return;
-  updateRecap(projectId(input.cwd), input.session_id, { lastReply: input.last_assistant_message });
+  if (input.last_assistant_message)
+    updateRecap(projectId(input.cwd), input.session_id, {
+      lastReply: input.last_assistant_message,
+    });
+  onRefresh();
+}
+
+const SNAPSHOT_TTL = 10 * 60_000;
+
+/** Async only: the shared folder may be a slow or offline network drive. */
+export function onRefresh(): void {
+  persistPluginOption();
+  refreshSnapshot(SNAPSHOT_TTL);
 }
 
 /**
@@ -388,6 +399,7 @@ function teamIndex(items: TeamItem[], skipped: number, budget: number): string {
 }
 
 export function onSessionStart(input: HookInput): string {
+  persistPluginOption();
   try {
     pruneObservations(RETENTION_DAYS, input.session_id);
   } catch {

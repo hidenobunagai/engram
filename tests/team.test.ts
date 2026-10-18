@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { loadTeam, parseFrontmatter, serialize, summaryOf, writeTeamItem } from "../src/team";
-import { sandbox } from "./helpers";
+import { joinTeam, sandbox } from "./helpers";
 
 const base = { kind: "caveat" as const, tables: [], tags: [], body: "body" };
 
@@ -42,6 +42,7 @@ describe("team store", () => {
       "---\nid: q1\nkind: query\ntitle: Q\ntarget_tables: dim_users\n---\nSELECT 1",
     );
     writeFileSync(join(team, "queries", "bad.md"), "no frontmatter");
+    joinTeam(work);
     const { items, skipped } = loadTeam(work);
     expect(items.map((i) => [i.id, i.tables])).toEqual([["q1", ["dim_users"]]]);
     expect(skipped.length).toBe(1);
@@ -55,6 +56,7 @@ describe("team store", () => {
       "null-revenue-2.md",
       "null-revenue.md",
     ]);
+    joinTeam(work);
     expect(loadTeam(work).items.length).toBe(2);
   });
   it("keeps Japanese titles readable in file names", () => {

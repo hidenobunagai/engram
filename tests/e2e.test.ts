@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { spawn, spawnSync } from "child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -215,5 +215,46 @@ describe("scope paths", () => {
       encoding: "utf-8",
     });
     expect(r.stdout).toContain("team scope: in scope");
+  });
+});
+
+describe("shared folder workflow", () => {
+  it("persists the plugin option, selects a project, previews and publishes", () => {
+    const e = env();
+    const share = join(e.ROOT!, "S-drive", "analytics", "engram");
+    mkdirSync(share, { recursive: true });
+    const base = { ...e, ENGRAM_TEAM_DIR: "" };
+    // Hooks receive the option from Claude Code; the session-start hook remembers it for the CLI.
+    const hook = spawnSync("node", [CLI, "hook", "session-start"], {
+      env: { ...base, CLAUDE_PLUGIN_OPTION_TEAM_DIR: share },
+      cwd: e.ROOT,
+      input: JSON.stringify({
+        session_id: "s1",
+        cwd: e.ROOT,
+        hook_event_name: "SessionStart",
+        source: "startup",
+      }),
+      encoding: "utf-8",
+    });
+    expect(hook.status).toBe(0);
+    const at = (args: string[]) =>
+      spawnSync("node", [CLI, ...args], { env: base, cwd: e.ROOT, encoding: "utf-8" });
+    expect(at(["status"]).stdout).toContain(`team folder: ${share}`);
+    expect(at(["scope"]).stdout).toContain("out of team scope");
+    expect(at(["scope", "on"]).stdout).toContain("in team scope (selected with /engram:scope on)");
+    const id = at([
+      "save",
+      "--kind",
+      "caveat",
+      "--title",
+      "Refunds",
+      "--body",
+      "Exclude refund_flag",
+    ]).stdout.match(/caveat (\S+):/)![1];
+    const preview = at(["share", id]).stdout;
+    expect(preview).toContain("Preview (nothing written yet)");
+    expect(existsSync(join(share, "caveats"))).toBe(false);
+    expect(at(["share", id, "--yes"]).stdout).toContain(join(share, "caveats", "refunds.md"));
+    expect(at(["recall", "refund_flag"]).stdout).toContain("[team caveat] Refunds");
   });
 });

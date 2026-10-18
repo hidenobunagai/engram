@@ -428,7 +428,16 @@ function search(docs, query, limit = 5, minIdf = 3) {
 }
 
 // src/team.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, readdirSync as readdirSync2, statSync as statSync2, writeFileSync as writeFileSync2 } from "fs";
+import {
+  existsSync as existsSync2,
+  mkdirSync as mkdirSync2,
+  readFileSync as readFileSync2,
+  readdirSync as readdirSync2,
+  renameSync as renameSync2,
+  statSync as statSync2,
+  unlinkSync as unlinkSync2,
+  writeFileSync as writeFileSync2
+} from "fs";
 import { homedir as homedir2 } from "os";
 import { dirname as dirname2, join as join2, resolve as resolve2 } from "path";
 var TEAM_KINDS = ["caveat", "metric", "query", "decision", "fact", "fix", "note"];
@@ -441,19 +450,40 @@ var FOLDER = {
   fix: "fixes",
   note: "notes"
 };
-function teamDirs(cwd) {
-  if (process.env.ENGRAM_TEAM_DIR)
-    return [resolve2(process.env.ENGRAM_TEAM_DIR)];
-  const dirs = [];
-  const local = projectStore(cwd);
-  if (local)
-    dirs.push(local);
-  if (existsSync2(sharedStore()))
-    dirs.push(sharedStore());
-  return dirs;
+var configFile = () => join2(dataDir(), "config.json");
+function readConfig() {
+  try {
+    const c = JSON.parse(readFileSync2(configFile(), "utf-8"));
+    return c && typeof c === "object" && !Array.isArray(c) ? c : {};
+  } catch {
+    return {};
+  }
+}
+function writeConfig(c) {
+  writeAtomic(configFile(), `${JSON.stringify(c, null, 2)}
+`);
+}
+function writeAtomic(file, text) {
+  mkdirSync2(dirname2(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync2(tmp, text, "utf-8");
+  renameSync2(tmp, file);
+}
+function persistPluginOption() {
+  const opt = process.env.CLAUDE_PLUGIN_OPTION_TEAM_DIR?.trim();
+  const c = readConfig();
+  if (opt && opt !== c.teamDir)
+    writeConfig({ ...c, teamDir: opt });
 }
 function sharedStore() {
-  return resolve2(process.env.ENGRAM_TEAM_DIR || join2(homedir2(), ".claude", "engram-team"));
+  const configured = process.env.ENGRAM_TEAM_DIR?.trim() || process.env.CLAUDE_PLUGIN_OPTION_TEAM_DIR?.trim() || readConfig().teamDir;
+  if (configured)
+    return resolve2(configured);
+  const fallback = join2(homedir2(), ".claude", "engram-team");
+  return existsSync2(fallback) ? fallback : undefined;
+}
+function teamDirs(cwd) {
+  return [projectStore(cwd), sharedStore()].filter((d) => !!d);
 }
 function projectStore(cwd) {
   const root = projectRoot(cwd);
@@ -492,37 +522,105 @@ function globMatch(pattern, text) {
   const re = pattern.trim().toLowerCase().replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
   return new RegExp(`^${re}$`).test(text.toLowerCase());
 }
-function teamScope(cwd) {
-  if (projectStore(cwd))
-    return { inScope: true, reason: "project has a .engram/ folder" };
-  const file = join2(sharedStore(), "scope.json");
+function samePath(a, b) {
+  const norm = (p) => {
+    const s = resolve2(p).replace(/\\/g, "/").replace(/\/+$/, "");
+    return process.platform === "win32" ? s.toLowerCase() : s;
+  };
+  return norm(a) === norm(b);
+}
+function readScopeFile(base) {
+  const file = join2(base, "scope.json");
   if (!existsSync2(file))
-    return { inScope: true, reason: "no scope.json in the team store (all projects)" };
-  let cfg;
+    return { scope: null };
   try {
     const raw = JSON.parse(readFileSync2(file, "utf-8"));
     const strings = (v) => v === undefined || Array.isArray(v) && v.every((x) => typeof x === "string");
     if (!raw || typeof raw !== "object" || Array.isArray(raw) || !strings(raw.projects) || !strings(raw.paths))
       throw new Error('expected {"projects": [strings], "paths": [strings]}');
-    cfg = { projects: raw.projects || [], paths: raw.paths || [] };
+    return { scope: { projects: raw.projects || [], paths: raw.paths || [] } };
   } catch (e) {
-    return { inScope: false, reason: `scope.json is invalid: ${e.message}` };
+    return { scope: null, error: `scope.json is invalid: ${e.message}` };
   }
+}
+var snapshotFile = () => join2(dataDir(), "team-snapshot.json");
+function readSnapshot() {
+  const dir = sharedStore();
+  if (!dir)
+    return null;
+  try {
+    const snap = JSON.parse(readFileSync2(snapshotFile(), "utf-8"));
+    return samePath(snap.dir, dir) ? snap : null;
+  } catch {
+    return null;
+  }
+}
+function refreshSnapshot(maxAgeMs = 0) {
+  const dir = sharedStore();
+  if (!dir)
+    return { snap: null };
+  const prev = readSnapshot();
+  if (prev && Date.now() - prev.at < maxAgeMs)
+    return { snap: prev };
+  const lock = `${snapshotFile()}.lock`;
+  try {
+    if (maxAgeMs > 0 && Date.now() - statSync2(lock).mtimeMs < 120000)
+      return { snap: prev };
+  } catch {}
+  mkdirSync2(dataDir(), { recursive: true });
+  writeFileSync2(lock, String(process.pid));
+  try {
+    if (!existsSync2(dir))
+      return { snap: prev, error: `team folder not reachable: ${dir}` };
+    const { scope, error } = readScopeFile(dir);
+    const snap = { dir, at: Date.now(), scope, ...scanStore(dir) };
+    if (error)
+      snap.scopeError = error;
+    writeAtomic(snapshotFile(), JSON.stringify(snap));
+    return { snap };
+  } catch (e) {
+    return { snap: prev, error: e.message };
+  } finally {
+    try {
+      unlinkSync2(lock);
+    } catch {}
+  }
+}
+function teamScope(cwd) {
+  if (projectStore(cwd))
+    return { inScope: true, reason: "project has a .engram/ folder" };
+  if (!sharedStore())
+    return { inScope: true, reason: "no team folder configured" };
   const root = projectRoot(cwd);
   const remote = gitRemote(root);
   const norm = remote ? normalizeRemote(remote) : "";
-  const hitProject = norm ? cfg.projects.find((p) => globMatch(normalizeRemote(p), norm)) : undefined;
+  const picked = (readConfig().projects || []).find((p) => samePath(p.root, root) || !!norm && p.remote === norm);
+  if (picked)
+    return { inScope: true, reason: "selected with /engram:scope on" };
+  const snap = readSnapshot();
+  if (snap?.scopeError)
+    return { inScope: false, reason: snap.scopeError };
+  const cfg = snap?.scope;
+  const hitProject = cfg && norm ? cfg.projects.find((p) => globMatch(normalizeRemote(p), norm)) : undefined;
   if (hitProject)
-    return { inScope: true, reason: `remote ${norm} matches "${hitProject}"` };
+    return { inScope: true, reason: `remote ${norm} matches "${hitProject}" in scope.json` };
   const path = root.replace(/\\/g, "/");
   const home = homedir2().replace(/\\/g, "/");
-  const hitPath = cfg.paths.find((p) => globMatch(p.replace(/\\/g, "/").replace(/^~(?=\/|$)/, home), path));
+  const hitPath = cfg?.paths.find((p) => globMatch(p.replace(/\\/g, "/").replace(/^~(?=\/|$)/, home), path));
   if (hitPath)
-    return { inScope: true, reason: `path ${path} matches "${hitPath}"` };
+    return { inScope: true, reason: `path ${path} matches "${hitPath}" in scope.json` };
   return {
     inScope: false,
-    reason: `not listed in scope.json (remote: ${norm || "none"}, path: ${path})`
+    reason: `not selected (remote: ${norm || "none"}, path: ${path}); run /engram:scope on here to include it`
   };
+}
+function setSelected(cwd, on) {
+  const root = projectRoot(cwd);
+  const remote = gitRemote(root);
+  const norm = remote ? normalizeRemote(remote) : undefined;
+  const c = readConfig();
+  const rest = (c.projects || []).filter((p) => !samePath(p.root, root) && !(norm && p.remote === norm));
+  writeConfig({ ...c, projects: on ? [...rest, norm ? { root, remote: norm } : { root }] : rest });
 }
 function parseFrontmatter(content) {
   const text = content.replace(/^﻿/, "").replace(/\r\n/g, `
@@ -584,48 +682,58 @@ function splitInline(inner) {
 }
 var asList = (v) => v === undefined || v === "" ? [] : Array.isArray(v) ? v : [v];
 var asText = (v) => Array.isArray(v) ? v.join(", ") || undefined : v || undefined;
-function loadTeam(cwd) {
-  const byId = new Map;
+function scanStore(base) {
+  const items = [];
   const skipped = [];
-  if (!teamScope(cwd).inScope)
-    return { items: [], skipped };
-  for (const base of [...teamDirs(cwd)].reverse()) {
-    for (const kind of TEAM_KINDS) {
-      const dir = join2(base, FOLDER[kind]);
-      if (!existsSync2(dir))
+  for (const kind of TEAM_KINDS) {
+    const dir = join2(base, FOLDER[kind]);
+    if (!existsSync2(dir))
+      continue;
+    for (const f of readdirSync2(dir)) {
+      if (!f.endsWith(".md"))
         continue;
-      for (const f of readdirSync2(dir)) {
-        if (!f.endsWith(".md"))
+      const path = join2(dir, f);
+      try {
+        const { meta, body } = parseFrontmatter(readFileSync2(path, "utf-8"));
+        const id = asText(meta.id);
+        const title = asText(meta.title);
+        if (!id || !title) {
+          skipped.push({ path, reason: "missing id or title in frontmatter" });
           continue;
-        const path = join2(dir, f);
-        try {
-          const { meta, body } = parseFrontmatter(readFileSync2(path, "utf-8"));
-          const id = asText(meta.id);
-          const title = asText(meta.title);
-          if (!id || !title) {
-            skipped.push({ path, reason: "missing id or title in frontmatter" });
-            continue;
-          }
-          byId.set(id, {
-            id,
-            kind: TEAM_KINDS.includes(asText(meta.kind) || "") ? asText(meta.kind) : kind,
-            title,
-            summary: asText(meta.summary),
-            tables: asList(meta.target_tables ?? meta.tables),
-            tags: asList(meta.tags),
-            author: asText(meta.author),
-            status: asText(meta.status),
-            created_at: asText(meta.created_at),
-            body,
-            path
-          });
-        } catch (e) {
-          skipped.push({ path, reason: e.message });
         }
+        items.push({
+          id,
+          kind: TEAM_KINDS.includes(asText(meta.kind) || "") ? asText(meta.kind) : kind,
+          title,
+          summary: asText(meta.summary),
+          tables: asList(meta.target_tables ?? meta.tables),
+          tags: asList(meta.tags),
+          author: asText(meta.author),
+          status: asText(meta.status),
+          created_at: asText(meta.created_at),
+          body,
+          path
+        });
+      } catch (e) {
+        skipped.push({ path, reason: e.message });
       }
     }
   }
-  return { items: [...byId.values()].filter((i) => i.status !== "deprecated"), skipped };
+  return { items, skipped };
+}
+function loadTeam(cwd) {
+  if (!teamScope(cwd).inScope)
+    return { items: [], skipped: [] };
+  const shared = readSnapshot();
+  const local = projectStore(cwd);
+  const own = local ? scanStore(local) : { items: [], skipped: [] };
+  const byId = new Map;
+  for (const i of [...shared?.items || [], ...own.items])
+    byId.set(i.id, i);
+  return {
+    items: [...byId.values()].filter((i) => i.status !== "deprecated"),
+    skipped: [...shared?.skipped || [], ...own.skipped]
+  };
 }
 function summaryOf(item) {
   if (item.summary)
@@ -831,9 +939,16 @@ function onToolUse(input) {
     detectFix(sessionObservations(project, input.session_id), obs, projectRoot(input.cwd));
 }
 function onStop(input) {
-  if (!input.last_assistant_message)
-    return;
-  updateRecap(projectId(input.cwd), input.session_id, { lastReply: input.last_assistant_message });
+  if (input.last_assistant_message)
+    updateRecap(projectId(input.cwd), input.session_id, {
+      lastReply: input.last_assistant_message
+    });
+  onRefresh();
+}
+var SNAPSHOT_TTL = 10 * 60000;
+function onRefresh() {
+  persistPluginOption();
+  refreshSnapshot(SNAPSHOT_TTL);
 }
 function buildDocs(cwd, opts = {}) {
   const project = projectId(cwd);
@@ -970,6 +1085,7 @@ function teamIndex(items, skipped, budget) {
 `);
 }
 function onSessionStart(input) {
+  persistPluginOption();
   try {
     pruneObservations(RETENTION_DAYS, input.session_id);
   } catch {}
@@ -1010,7 +1126,8 @@ var USAGE = `engram <command>
   save --kind K --title T [--tables a,b] [--tags x,y] [--body TEXT | stdin]
                                        kinds: ${KINDS.join(", ")}
   forget <note-id>                     erase a saved note
-  share [<note-id>] [--to DIR]         list shareable notes, or write one as a team Markdown file
+  share [<note-id>] [--yes] [--to DIR] list shareable notes, preview one, or publish it with --yes
+  scope [on|off]                       show, select or unselect this project for team sharing
   history [--all] [--limit N]          list past sessions (this project, or all projects)
   history <session-id|YYYY-MM-DD>      show what happened in a session or on a day
   status                               show what is stored, loaded and in team scope
@@ -1057,6 +1174,8 @@ function runHook(event) {
     onToolUse(input);
   else if (event === "stop")
     onStop(input);
+  else if (event === "refresh")
+    onRefresh();
   if (out)
     process.stdout.write(`${out}
 `);
@@ -1091,7 +1210,10 @@ function save(opt) {
   return `Saved ${note.kind} ${note.id}: ${note.title}${personal}`;
 }
 var shareable = (n) => !!n.root && teamScope(n.root).inScope;
-function share(id, opt) {
+function share(id, opt, yes) {
+  const { error } = refreshSnapshot(0);
+  if (error)
+    throw new Error(error);
   if (!id) {
     const shared = new Set(loadTeam(process.cwd()).items.map((t) => t.id));
     const candidates = allNotes().filter((n) => !shared.has(n.id) && shareable(n)).sort((a, b) => b.ts - a.ts).slice(0, 20);
@@ -1108,13 +1230,13 @@ function share(id, opt) {
   if (!note)
     throw new Error(`No saved note with id "${id}". Find ids with: engram recall <words>`);
   if (!shareable(note)) {
-    throw new Error(`${id} comes from a project outside the team scope (${note.root || "unknown project"}), so it stays personal. ` + "Add that project to scope.json in the team repository, or give it a .engram/ folder.");
+    throw new Error(`${id} comes from a project outside the team scope (${note.root || "unknown project"}), so it stays personal. ` + "Run /engram:scope on in that project (or list it in the team's scope.json), then share it from there.");
   }
-  const base = opt.to || teamDirs(process.cwd())[0];
+  const base = opt.to || sharedStore() || projectStore(process.cwd());
   if (!base) {
-    throw new Error("No team store found. Clone the team repo to ~/.claude/engram-team, create .engram/ in the project, or pass --to DIR.");
+    throw new Error("No team folder configured. Set it with: claude plugin configure engram (team_dir), or pass --to DIR.");
   }
-  const path = writeTeamItem(base, {
+  const item = {
     id: note.id,
     kind: note.kind,
     title: note.title,
@@ -1123,9 +1245,16 @@ function share(id, opt) {
     author: process.env.ENGRAM_AUTHOR,
     created_at: new Date(note.ts).toISOString().slice(0, 10),
     body: note.body
-  });
+  };
+  if (!yes)
+    return `Preview (nothing written yet) — would write to ${base}:
+
+${serialize(item)}
+Run again with --yes to publish it to the team.`;
+  const path = writeTeamItem(base, item);
+  refreshSnapshot(0);
   return `Wrote ${path}
-Review it, then commit and open a PR in that repository to share it with the team.`;
+Teammates see it in their next session (a git-backed folder also needs a commit and push).`;
 }
 function history(pos, opt) {
   const project = projectId(process.cwd());
@@ -1164,8 +1293,19 @@ function history(pos, opt) {
   ].join(`
 `);
 }
+function scope(action) {
+  const cwd = process.cwd();
+  if (action === "on" || action === "off")
+    setSelected(cwd, action === "on");
+  else if (action)
+    throw new Error("Usage: engram scope [on|off]");
+  refreshSnapshot(0);
+  const s = teamScope(cwd);
+  return `${projectRoot(cwd)}: ${s.inScope ? "in" : "out of"} team scope (${s.reason})`;
+}
 function status() {
   const cwd = process.cwd();
+  const { snap, error } = refreshSnapshot(0);
   const project = projectId(cwd);
   const notes = allNotes();
   const byKind = KINDS.map((k) => [k, notes.filter((n) => n.kind === k).length]).filter(([, c]) => c);
@@ -1178,6 +1318,8 @@ function status() {
     `- saved notes: ${notes.length}${byKind.length ? ` (${byKind.map(([k, c]) => `${k} ${c}`).join(", ")})` : ""}`,
     `- captured observations for this project: ${obs.length} (errors: ${obs.filter((o) => o.error).length})`,
     `- team scope: ${teamScope(cwd).inScope ? "in scope" : "out of scope"} (${teamScope(cwd).reason})`,
+    `- team folder: ${sharedStore() || "none"}${error ? ` (${error})` : ""}`,
+    `- team snapshot: ${snap ? `${snap.items.length} items, ${localTime(snap.at)}` : "none"}`,
     `- team stores: ${teamDirs(cwd).join(", ") || "none"}`,
     `- team items loaded: ${items.length}`
   ];
@@ -1206,7 +1348,9 @@ function main() {
     else if (cmd === "forget")
       out = forget(pos[0] || "") ? `Forgot ${pos[0]}` : `No saved note with id "${pos[0]}"`;
     else if (cmd === "share")
-      out = share(pos[0], opt);
+      out = share(pos.find((p) => p !== "--yes"), opt, pos.includes("--yes"));
+    else if (cmd === "scope")
+      out = scope(pos[0]);
     else if (cmd === "history")
       out = history(pos, opt);
     else if (cmd === "status")

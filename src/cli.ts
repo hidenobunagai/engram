@@ -3,6 +3,7 @@ import { join } from "path";
 import {
   type HookInput,
   buildDocs,
+  onRefresh,
   onPrompt,
   onSessionStart,
   onStop,
@@ -25,14 +26,25 @@ import {
   saveNote,
 } from "./memory";
 import { search } from "./search";
-import { loadTeam, teamDirs, teamScope, writeTeamItem } from "./team";
+import {
+  loadTeam,
+  projectStore,
+  refreshSnapshot,
+  serialize,
+  setSelected,
+  sharedStore,
+  teamDirs,
+  teamScope,
+  writeTeamItem,
+} from "./team";
 
 const USAGE = `engram <command>
   recall <words...> [--limit N]        search personal memory and team knowledge
   save --kind K --title T [--tables a,b] [--tags x,y] [--body TEXT | stdin]
                                        kinds: ${KINDS.join(", ")}
   forget <note-id>                     erase a saved note
-  share [<note-id>] [--to DIR]         list shareable notes, or write one as a team Markdown file
+  share [<note-id>] [--yes] [--to DIR] list shareable notes, preview one, or publish it with --yes
+  scope [on|off]                       show, select or unselect this project for team sharing
   history [--all] [--limit N]          list past sessions (this project, or all projects)
   history <session-id|YYYY-MM-DD>      show what happened in a session or on a day
   status                               show what is stored, loaded and in team scope
@@ -89,6 +101,7 @@ function runHook(event: string): void {
   else if (event === "prompt") out = onPrompt(input);
   else if (event === "tool") onToolUse(input);
   else if (event === "stop") onStop(input);
+  else if (event === "refresh") onRefresh();
   if (out) process.stdout.write(`${out}\n`);
 }
 
@@ -124,7 +137,9 @@ function save(opt: Record<string, string>): string {
 const shareable = (n: Note) => !!n.root && teamScope(n.root).inScope;
 
 /** Without an id: the newest shareable notes that are not in the team store yet. */
-function share(id: string | undefined, opt: Record<string, string>): string {
+function share(id: string | undefined, opt: Record<string, string>, yes: boolean): string {
+  const { error } = refreshSnapshot(0);
+  if (error) throw new Error(error);
   if (!id) {
     const shared = new Set(loadTeam(process.cwd()).items.map((t) => t.id));
     const candidates = allNotes()
@@ -144,16 +159,16 @@ function share(id: string | undefined, opt: Record<string, string>): string {
   if (!shareable(note)) {
     throw new Error(
       `${id} comes from a project outside the team scope (${note.root || "unknown project"}), so it stays personal. ` +
-        "Add that project to scope.json in the team repository, or give it a .engram/ folder.",
+        "Run /engram:scope on in that project (or list it in the team's scope.json), then share it from there.",
     );
   }
-  const base = opt.to || teamDirs(process.cwd())[0];
+  const base = opt.to || sharedStore() || projectStore(process.cwd());
   if (!base) {
     throw new Error(
-      "No team store found. Clone the team repo to ~/.claude/engram-team, create .engram/ in the project, or pass --to DIR.",
+      "No team folder configured. Set it with: claude plugin configure engram (team_dir), or pass --to DIR.",
     );
   }
-  const path = writeTeamItem(base, {
+  const item = {
     id: note.id,
     kind: note.kind,
     title: note.title,
@@ -162,8 +177,13 @@ function share(id: string | undefined, opt: Record<string, string>): string {
     author: process.env.ENGRAM_AUTHOR,
     created_at: new Date(note.ts).toISOString().slice(0, 10),
     body: note.body,
-  });
-  return `Wrote ${path}\nReview it, then commit and open a PR in that repository to share it with the team.`;
+  };
+  // Writing to a shared folder publishes at once, so the default is a preview.
+  if (!yes)
+    return `Preview (nothing written yet) — would write to ${base}:\n\n${serialize(item)}\nRun again with --yes to publish it to the team.`;
+  const path = writeTeamItem(base, item);
+  refreshSnapshot(0);
+  return `Wrote ${path}\nTeammates see it in their next session (a git-backed folder also needs a commit and push).`;
 }
 
 function history(pos: string[], opt: Record<string, string>): string {
@@ -207,8 +227,18 @@ function history(pos: string[], opt: Record<string, string>): string {
   ].join("\n");
 }
 
+function scope(action?: string): string {
+  const cwd = process.cwd();
+  if (action === "on" || action === "off") setSelected(cwd, action === "on");
+  else if (action) throw new Error("Usage: engram scope [on|off]");
+  refreshSnapshot(0);
+  const s = teamScope(cwd);
+  return `${projectRoot(cwd)}: ${s.inScope ? "in" : "out of"} team scope (${s.reason})`;
+}
+
 function status(): string {
   const cwd = process.cwd();
+  const { snap, error } = refreshSnapshot(0);
   const project = projectId(cwd);
   const notes = allNotes();
   const byKind = KINDS.map((k) => [k, notes.filter((n) => n.kind === k).length] as const).filter(
@@ -223,6 +253,8 @@ function status(): string {
     `- saved notes: ${notes.length}${byKind.length ? ` (${byKind.map(([k, c]) => `${k} ${c}`).join(", ")})` : ""}`,
     `- captured observations for this project: ${obs.length} (errors: ${obs.filter((o) => o.error).length})`,
     `- team scope: ${teamScope(cwd).inScope ? "in scope" : "out of scope"} (${teamScope(cwd).reason})`,
+    `- team folder: ${sharedStore() || "none"}${error ? ` (${error})` : ""}`,
+    `- team snapshot: ${snap ? `${snap.items.length} items, ${localTime(snap.at)}` : "none"}`,
     `- team stores: ${teamDirs(cwd).join(", ") || "none"}`,
     `- team items loaded: ${items.length}`,
   ];
@@ -247,7 +279,13 @@ function main(): void {
     else if (cmd === "save") out = save(opt);
     else if (cmd === "forget")
       out = forget(pos[0] || "") ? `Forgot ${pos[0]}` : `No saved note with id "${pos[0]}"`;
-    else if (cmd === "share") out = share(pos[0], opt);
+    else if (cmd === "share")
+      out = share(
+        pos.find((p) => p !== "--yes"),
+        opt,
+        pos.includes("--yes"),
+      );
+    else if (cmd === "scope") out = scope(pos[0]);
     else if (cmd === "history") out = history(pos, opt);
     else if (cmd === "status") out = status();
     else out = USAGE;
