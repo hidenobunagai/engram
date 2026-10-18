@@ -1,3 +1,16 @@
 {
-  "modules": ["./register.tsx"]
+  "description": "Engram data analyst memory hooks for prompt context injection",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/src/cli.ts\" context",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
 }

@@ -20,17 +20,28 @@
 
 ## 🚀 Quick Start
 
-### Installation
+### Installation via Claude Code Plugin Marketplace
 
-Clone and install dependencies with `bun`:
+You can install `engram` directly inside Claude Code:
+
+```bash
+# In Claude Code chat:
+/plugin install engram --marketplace hidenobunagai/engram
+```
+
+Or from your terminal:
+
+```bash
+claude plugin marketplace add hidenobunagai/engram
+claude plugin install engram
+```
+
+### Development Setup
+
+Clone the repository and install dependencies with `bun`:
 
 ```bash
 bun install
-```
-
-To run tests:
-
-```bash
 bun test
 ```
 

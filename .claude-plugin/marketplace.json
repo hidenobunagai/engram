@@ -1,0 +1,21 @@
+{
+  "name": "engram-marketplace",
+  "description": "Team memory and data analyst knowledge base marketplace for Claude Code",
+  "owner": {
+    "name": "hidenobunagai",
+    "url": "https://github.com/hidenobunagai"
+  },
+  "plugins": [
+    {
+      "name": "engram",
+      "source": "./",
+      "description": "Team memory and knowledge base for data analysts in Claude Code",
+      "version": "0.1.0",
+      "author": {
+        "name": "hidenobunagai",
+        "url": "https://github.com/hidenobunagai"
+      },
+      "license": "MIT"
+    }
+  ]
+}
