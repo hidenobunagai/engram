@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
+import { homedir } from "os";
 import { basename, join, resolve } from "path";
-import type { GitKnowledgeFrontmatter, GitKnowledgeItem, KnowledgeKind } from "./types";
 import { sanitizeContent } from "./sanitizer";
+import type { GitKnowledgeFrontmatter, GitKnowledgeItem, KnowledgeKind } from "./types";
 
 /**
  * Parses simple YAML frontmatter without requiring heavy external YAML parsers.
@@ -99,24 +100,65 @@ export function slugify(text: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-export class GitKnowledgeStore {
-  private baseDir: string;
+export interface GitKnowledgeStoreOptions {
+  projectDir?: string;
+  globalDir?: string;
+  customDir?: string;
+}
 
-  constructor(repoRoot: string) {
-    this.baseDir = resolve(repoRoot, ".engram");
+export class GitKnowledgeStore {
+  private globalDir: string;
+  private projectDir?: string;
+  private customDir?: string;
+
+  constructor(options?: string | GitKnowledgeStoreOptions) {
+    if (typeof options === "string") {
+      // Backwards compatibility: single dir passed
+      this.globalDir = resolve(options, ".engram");
+    } else {
+      const envDir = process.env.ENGRAM_DIR;
+      this.customDir =
+        options?.customDir || envDir ? resolve(options?.customDir || envDir!) : undefined;
+      this.globalDir = options?.globalDir
+        ? resolve(options.globalDir)
+        : resolve(homedir(), ".claude", "engram");
+
+      const proj = options?.projectDir || process.cwd();
+      const projEngram = resolve(proj, ".engram");
+      this.projectDir = existsSync(projEngram) ? projEngram : undefined;
+    }
   }
 
-  public getDirectory(): string {
-    return this.baseDir;
+  public getGlobalDirectory(): string {
+    return this.globalDir;
+  }
+
+  public getProjectDirectory(): string | undefined {
+    return this.projectDir;
   }
 
   /**
-   * Ensures the .engram directory structure exists.
+   * Returns active knowledge directories ordered by priority (custom -> project -> global).
    */
-  public initDirectories(): void {
+  public getActiveDirectories(): string[] {
+    const dirs: string[] = [];
+    if (this.customDir) {
+      dirs.push(this.customDir);
+      return dirs;
+    }
+    if (this.projectDir) dirs.push(this.projectDir);
+    dirs.push(this.globalDir);
+    return dirs;
+  }
+
+  /**
+   * Ensures the knowledge directory structure exists.
+   */
+  public initDirectories(targetDir?: string): void {
+    const base = targetDir || this.customDir || this.globalDir;
     const kinds: KnowledgeKind[] = ["caveat", "metric", "query", "decision", "fact"];
     for (const kind of kinds) {
-      const dir = join(this.baseDir, `${kind}s`);
+      const dir = join(base, `${kind}s`);
       if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true });
       }
@@ -124,59 +166,80 @@ export class GitKnowledgeStore {
   }
 
   /**
-   * Loads all knowledge items from .engram/
+   * Loads all knowledge items from active directories (global + project, project overrides global by ID).
    */
   public loadAll(): GitKnowledgeItem[] {
-    if (!existsSync(this.baseDir)) return [];
-
-    const items: GitKnowledgeItem[] = [];
+    const itemsMap = new Map<string, GitKnowledgeItem>();
     const kinds: KnowledgeKind[] = ["caveat", "metric", "query", "decision", "fact"];
 
-    for (const kind of kinds) {
-      const dir = join(this.baseDir, `${kind}s`);
-      if (!existsSync(dir)) continue;
+    // Load in reverse order so that higher priority directories overwrite lower ones
+    const dirs = [...this.getActiveDirectories()].reverse();
 
-      const files = readdirSync(dir).filter((f) => f.endsWith(".md"));
-      for (const file of files) {
-        const filePath = join(dir, file);
+    for (const baseDir of dirs) {
+      if (!existsSync(baseDir)) continue;
+
+      for (const kind of kinds) {
+        const dir = join(baseDir, `${kind}s`);
+        if (!existsSync(dir)) continue;
+
+        let files: string[] = [];
         try {
-          const content = readFileSync(filePath, "utf-8");
-          const { frontmatter, body } = parseFrontmatter(content);
-
-          if (frontmatter.title && frontmatter.id) {
-            items.push({
-              id: frontmatter.id,
-              kind: (frontmatter.kind as KnowledgeKind) || kind,
-              title: frontmatter.title,
-              target_tables: frontmatter.target_tables || [],
-              tags: frontmatter.tags || [],
-              author: frontmatter.author,
-              created_at: frontmatter.created_at || new Date().toISOString(),
-              updated_at: frontmatter.updated_at,
-              filePath,
-              body,
-            });
-          }
+          files = readdirSync(dir).filter((f) => f.endsWith(".md"));
         } catch {
-          // Ignore corrupt or unreadable files gracefully
+          continue;
+        }
+
+        for (const file of files) {
+          const filePath = join(dir, file);
+          try {
+            const content = readFileSync(filePath, "utf-8");
+            const { frontmatter, body } = parseFrontmatter(content);
+
+            if (frontmatter.title && frontmatter.id) {
+              itemsMap.set(frontmatter.id, {
+                id: frontmatter.id,
+                kind: (frontmatter.kind as KnowledgeKind) || kind,
+                title: frontmatter.title,
+                target_tables: frontmatter.target_tables || [],
+                tags: frontmatter.tags || [],
+                author: frontmatter.author,
+                created_at: frontmatter.created_at || new Date().toISOString(),
+                updated_at: frontmatter.updated_at,
+                filePath,
+                body,
+              });
+            }
+          } catch {
+            // Ignore corrupt or unreadable files gracefully
+          }
         }
       }
     }
 
-    return items;
+    return Array.from(itemsMap.values());
   }
 
   /**
    * Saves or updates a knowledge item as a markdown file.
+   * By default saves to globalDir unless projectDir exists or saveTarget is specified.
    */
-  public save(item: Omit<GitKnowledgeItem, "filePath"> & { slug?: string }): GitKnowledgeItem {
-    this.initDirectories();
+  public save(
+    item: Omit<GitKnowledgeItem, "filePath"> & { slug?: string },
+    options?: { saveTarget?: "global" | "project" },
+  ): GitKnowledgeItem {
+    let targetBase = this.globalDir;
+    if (this.customDir) {
+      targetBase = this.customDir;
+    } else if (options?.saveTarget === "project" && this.projectDir) {
+      targetBase = this.projectDir;
+    }
+
+    this.initDirectories(targetBase);
 
     const slug = item.slug || slugify(item.title) || item.id;
-    const kindDir = join(this.baseDir, `${item.kind}s`);
+    const kindDir = join(targetBase, `${item.kind}s`);
     const filePath = join(kindDir, `${slug}.md`);
 
-    // Ensure content is sanitized before writing to git
     const sanitizedBody = sanitizeContent(item.body);
     const sanitizedTitle = sanitizeContent(item.title);
 

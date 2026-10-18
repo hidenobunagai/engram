@@ -45,21 +45,41 @@ bun install
 bun test
 ```
 
-### Repository Structure for `.engram/`
+### Knowledge Store Architecture (Global-First & Hierarchical)
 
-In your data repository, `engram` manages knowledge under `.engram/`:
+Data analysts frequently switch between multiple directories (ad-hoc queries, dbt, notebooks, scripts), but query the **same company data warehouse**.
+
+`engram` supports a **Hierarchical Knowledge Store**:
+
+1. **Global Store (`~/.claude/engram`) [Default & Recommended]**:
+   - Always active across all folders on your machine.
+   - Ideal for team-wide DWH caveats, table quirks, and KPI definitions.
+2. **Project Store (`./.engram/`) [Optional]**:
+   - If present in the current working directory, project-level items are automatically merged (and can override global items with matching IDs).
+3. **Environment Variable (`ENGRAM_DIR`)**:
+   - Overrides search paths to point directly to any shared folder or cloned repo.
+
+#### Recommended Team Workflow:
+
+Create a single central Git repository for your data analyst team's knowledge:
+
+```bash
+# Clone your team's knowledge repository directly to ~/.claude/engram:
+git clone git@github.com:your-company/dwh-knowledge.git ~/.claude/engram
+```
+
+Now, wherever you open Claude Code on your PC, all team metrics and data caveats are instantly loaded!
 
 ```
-your-analytics-repo/
-├── .engram/
-│   ├── caveats/      # Known data traps & table quirks
-│   │   └── dim_users_soft_deletes.md
-│   ├── metrics/      # Official KPI definitions & formulas
-│   │   └── monthly_active_users.md
-│   ├── queries/      # Peer-reviewed golden SQL queries
-│   │   └── cohort_retention.md
-│   └── decisions/    # Analytical methodologies & agreements
-│       └── fy26_churn_window.md
+~/.claude/engram/ (or your-analytics-repo/.engram/)
+├── caveats/      # Known data traps & table quirks
+│   └── dim_users_soft_deletes.md
+├── metrics/      # Official KPI definitions & formulas
+│   └── monthly_active_users.md
+├── queries/      # Peer-reviewed golden SQL queries
+│   └── cohort_retention.md
+└── decisions/    # Analytical methodologies & agreements
+    └── fy26_churn_window.md
 ```
 
 ### Commands in Claude Code

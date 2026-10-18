@@ -9,11 +9,14 @@ import {
 } from "../src/core/git-store";
 
 const TEST_DIR = join(import.meta.dir, "tmp-git-store");
+const GLOBAL_DIR = join(TEST_DIR, "global-engram");
+const PROJ_DIR = join(TEST_DIR, "proj-engram");
 
 describe("GitKnowledgeStore", () => {
   beforeAll(() => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true, force: true });
-    mkdirSync(TEST_DIR, { recursive: true });
+    mkdirSync(GLOBAL_DIR, { recursive: true });
+    mkdirSync(join(PROJ_DIR, ".engram"), { recursive: true });
   });
 
   afterAll(() => {
@@ -60,7 +63,10 @@ This is a test description.
   });
 
   it("saves, loads, and sanitizes knowledge items in directory", () => {
-    const store = new GitKnowledgeStore(TEST_DIR);
+    const store = new GitKnowledgeStore({
+      globalDir: GLOBAL_DIR,
+      projectDir: join(TEST_DIR, "isolated-proj"),
+    });
     store.initDirectories();
 
     const saved = store.save({
@@ -90,5 +96,58 @@ This is a test description.
 
     const searchNoMatch = store.search("nonexistent query");
     expect(searchNoMatch.length).toBe(0);
+  });
+
+  it("merges global and project-level knowledge with project override", () => {
+    const store = new GitKnowledgeStore({
+      globalDir: GLOBAL_DIR,
+      projectDir: PROJ_DIR,
+    });
+
+    // Save a global metric
+    store.save({
+      id: "met-revenue",
+      kind: "metric",
+      title: "Gross Revenue Global",
+      created_at: "2026-10-18",
+      body: "Global definition of gross revenue.",
+    });
+
+    // Save a project-specific override for the same ID
+    store.save(
+      {
+        id: "met-revenue",
+        kind: "metric",
+        title: "Gross Revenue Project Override",
+        created_at: "2026-10-18",
+        body: "Project-specific revenue calculation.",
+      },
+      { saveTarget: "project" },
+    );
+
+    // Save a project-only caveat
+    store.save(
+      {
+        id: "cav-proj-only",
+        kind: "caveat",
+        title: "Project Specific Quirk",
+        created_at: "2026-10-18",
+        body: "Only applies to this project.",
+      },
+      { saveTarget: "project" },
+    );
+
+    const all = store.loadAll();
+    // met-revenue should be overridden by project version
+    const revMetric = all.find((i) => i.id === "met-revenue");
+    expect(revMetric?.title).toBe("Gross Revenue Project Override");
+
+    // cav-proj-only should be present
+    const projCaveat = all.find((i) => i.id === "cav-proj-only");
+    expect(projCaveat).toBeDefined();
+
+    // cav-users-del from global should still be present
+    const globalCaveat = all.find((i) => i.id === "cav-users-del");
+    expect(globalCaveat).toBeDefined();
   });
 });

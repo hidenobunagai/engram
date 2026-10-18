@@ -8,7 +8,7 @@ import type { ToolContext } from "./tools/index";
 
 function getContext(): ToolContext {
   const cwd = process.cwd();
-  const gitStore = new GitKnowledgeStore(cwd);
+  const gitStore = new GitKnowledgeStore({ projectDir: cwd });
   const dbPath = join(homedir(), ".claude", "engram", "local.db");
   const localStorage = new LocalStorage(dbPath);
   const searchEngine = new HybridSearchEngine(gitStore, localStorage);

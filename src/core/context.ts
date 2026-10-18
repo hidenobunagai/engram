@@ -14,7 +14,7 @@ let instance: PluginContext | null = null;
 
 export function getPluginContext(cwd: string): PluginContext {
   if (!instance) {
-    const gitStore = new GitKnowledgeStore(cwd);
+    const gitStore = new GitKnowledgeStore({ projectDir: cwd });
     const dbPath = join(homedir(), ".claude", "engram", "local.db");
     const localStorage = new LocalStorage(dbPath);
     const searchEngine = new HybridSearchEngine(gitStore, localStorage);

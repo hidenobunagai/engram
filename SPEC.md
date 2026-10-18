@@ -44,11 +44,12 @@ While software engineers primarily track code structure and dependencies, data a
 - **Automatic Capture**: Automatically tracks executed queries, script errors, and solutions within the user's local sessions.
 - **Private & Safe**: Never pushed to git. Automatically sanitizes database connection strings, passwords, and API keys before saving.
 
-### Tier 2: Team Curated Knowledge (Git-backed `.engram/`)
+### Tier 2: Team Curated Knowledge (Git-backed, Global-First & Hierarchical)
 
-- **Version Controlled**: Stored as human-readable Markdown files with YAML frontmatter inside the repository's `.engram/` directory.
-- **Collaborative Review**: Team members update metrics and data caveats via normal Pull Requests.
-- **Automatic Context Injection**: At the start of every Claude Code session (`session.start`), `engram` scans `.engram/` and injects verified business rules and data traps directly into Claude's prompt context.
+- **Global by Default (`~/.claude/engram/`)**: Data analysts work across diverse folders, but against the same company DWH. A single cloned repository in `~/.claude/engram/` makes company metrics and caveats instantly active across all project folders on the analyst's machine.
+- **Optional Project Overrides (`./.engram/`)**: When present, project-local knowledge files are merged, overriding global items with identical IDs.
+- **Collaborative Review**: Team members update metrics and data caveats via normal Pull Requests in the shared knowledge Git repository.
+- **Automatic Context Injection**: At the start of every Claude Code session (`session.start`), `engram` scans active knowledge stores and injects verified business rules and data traps directly into Claude's prompt context.
 
 ---
 
