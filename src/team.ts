@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join, resolve } from "path";
 import type { Kind } from "./memory";
@@ -38,19 +38,115 @@ const FOLDER: Record<Kind, string> = {
 export function teamDirs(cwd: string): string[] {
   if (process.env.ENGRAM_TEAM_DIR) return [resolve(process.env.ENGRAM_TEAM_DIR)];
   const dirs: string[] = [];
+  const local = projectStore(cwd);
+  if (local) dirs.push(local);
+  if (existsSync(sharedStore())) dirs.push(sharedStore());
+  return dirs;
+}
+
+/** The shared team repository: ENGRAM_TEAM_DIR or ~/.claude/engram-team. Holds scope.json. */
+export function sharedStore(): string {
+  return resolve(process.env.ENGRAM_TEAM_DIR || join(homedir(), ".claude", "engram-team"));
+}
+
+/** Nearest `.engram/` between cwd and the repository root. */
+export function projectStore(cwd: string): string | undefined {
   const root = projectRoot(cwd);
   let dir = resolve(cwd);
   for (;;) {
-    if (existsSync(join(dir, ".engram"))) {
-      dirs.push(join(dir, ".engram"));
-      break;
-    }
-    if (dir === root || dirname(dir) === dir) break;
+    if (existsSync(join(dir, ".engram"))) return join(dir, ".engram");
+    if (dir === root || dirname(dir) === dir) return undefined;
     dir = dirname(dir);
   }
-  const global = join(homedir(), ".claude", "engram-team");
-  if (existsSync(global)) dirs.push(global);
-  return dirs;
+}
+
+/** The origin (else first) remote URL from .git/config, read directly so no git process is spawned. */
+export function gitRemote(root: string): string | undefined {
+  try {
+    let gitDir = join(root, ".git");
+    if (statSync(gitDir).isFile()) {
+      // Worktree or submodule: ".git" is a file pointing at the real git dir; config lives in its commondir.
+      gitDir = resolve(
+        root,
+        readFileSync(gitDir, "utf-8")
+          .replace(/^gitdir:\s*/, "")
+          .trim(),
+      );
+      const common = join(gitDir, "commondir");
+      if (existsSync(common)) gitDir = resolve(gitDir, readFileSync(common, "utf-8").trim());
+    }
+    const config = readFileSync(join(gitDir, "config"), "utf-8");
+    const remotes = [...config.matchAll(/\[remote "([^"]+)"\]([^[]*)/g)].map((m) => ({
+      name: m[1],
+      url: m[2].match(/^\s*url\s*=\s*(.+)$/m)?.[1].trim(),
+    }));
+    return (remotes.find((r) => r.name === "origin") || remotes[0])?.url;
+  } catch {
+    return undefined;
+  }
+}
+
+/** git@github.com:org/repo.git and https://github.com/org/repo -> github.com/org/repo */
+export function normalizeRemote(url: string): string {
+  return url
+    .trim()
+    .replace(/^[a-z+]+:\/\//i, "")
+    .replace(/^[^@/]+@/, "")
+    .replace(/^([^/:]+):(?!\d+\/)/, "$1/")
+    .replace(/^([^/:]+):\d+\//, "$1/")
+    .replace(/\.git$/, "")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
+/** `*` matches any characters, including "/". The whole string must match. */
+function globMatch(pattern: string, text: string): boolean {
+  const re = pattern
+    .trim()
+    .toLowerCase()
+    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*");
+  return new RegExp(`^${re}$`).test(text.toLowerCase());
+}
+
+export interface Scope {
+  inScope: boolean;
+  reason: string;
+}
+
+/**
+ * Whether team knowledge applies to this project, in both directions: it is injected here, and notes
+ * saved here may be shared. In scope when the repo has a `.engram/` folder, when scope.json is
+ * absent (not configured), or when its `projects` (git remote) or `paths` patterns match.
+ */
+export function teamScope(cwd: string): Scope {
+  if (projectStore(cwd)) return { inScope: true, reason: "project has a .engram/ folder" };
+  const file = join(sharedStore(), "scope.json");
+  if (!existsSync(file))
+    return { inScope: true, reason: "no scope.json in the team store (all projects)" };
+  let cfg: { projects?: string[]; paths?: string[] };
+  try {
+    cfg = JSON.parse(readFileSync(file, "utf-8"));
+  } catch (e) {
+    return { inScope: false, reason: `scope.json is invalid: ${(e as Error).message}` };
+  }
+  const root = projectRoot(cwd);
+  const remote = gitRemote(root);
+  const norm = remote ? normalizeRemote(remote) : "";
+  const hitProject = norm
+    ? (cfg.projects || []).find((p) => globMatch(normalizeRemote(p), norm))
+    : undefined;
+  if (hitProject) return { inScope: true, reason: `remote ${norm} matches "${hitProject}"` };
+  const path = root.replace(/\\/g, "/");
+  const home = homedir().replace(/\\/g, "/");
+  const hitPath = (cfg.paths || []).find((p) =>
+    globMatch(p.replace(/^~(?=\/|$)/, home).replace(/\\/g, "/"), path),
+  );
+  if (hitPath) return { inScope: true, reason: `path ${path} matches "${hitPath}"` };
+  return {
+    inScope: false,
+    reason: `not listed in scope.json (remote: ${norm || "none"}, path: ${path})`,
+  };
 }
 
 /** Minimal YAML subset: `key: scalar`, `key: [a, "b"]`, and block lists (`key:` then `- a`). */
@@ -123,10 +219,11 @@ export interface LoadResult {
   skipped: Array<{ path: string; reason: string }>;
 }
 
-/** Loads every store; a higher-priority store overrides items with the same id. */
+/** Loads every store (nothing outside the team scope); a higher-priority store overrides the same id. */
 export function loadTeam(cwd: string): LoadResult {
   const byId = new Map<string, TeamItem>();
   const skipped: LoadResult["skipped"] = [];
+  if (!teamScope(cwd).inScope) return { items: [], skipped };
   for (const base of [...teamDirs(cwd)].reverse()) {
     for (const kind of TEAM_KINDS) {
       const dir = join(base, FOLDER[kind]);

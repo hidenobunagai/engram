@@ -123,6 +123,15 @@ function clipMiddle(text, max) {
 …
 ${text.slice(text.length - (max - head))}`;
 }
+var pad = (n) => String(n).padStart(2, "0");
+function localDay(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+function localTime(ts) {
+  const d = new Date(ts);
+  return `${localDay(ts)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 function newId(prefix) {
   return `${prefix}-${randomUUID().slice(0, 8)}`;
 }
@@ -217,14 +226,17 @@ function projectObservations(project, opts = {}) {
   return readdirSync(dir).filter((f) => f.endsWith(".jsonl")).flatMap((f) => readLines(join(dir, f), skip));
 }
 function saveNote(n) {
+  const title = clip(sanitize(n.title).replace(/\s+/g, " ").trim(), 200);
+  const body = clip(sanitize(n.body), MAX_BODY);
+  const same = n.id ? undefined : allNotes().find((x) => x.kind === n.kind && x.title === title && x.body === body);
   const note = {
     t: "note",
-    id: n.id || newId(n.kind),
+    id: n.id || same?.id || newId(n.kind),
     ts: Date.now(),
     project: n.project,
     kind: n.kind,
-    title: clip(sanitize(n.title).replace(/\s+/g, " ").trim(), 200),
-    body: clip(sanitize(n.body), MAX_BODY)
+    title,
+    body
   };
   if (n.session)
     note.session = n.session;
@@ -232,6 +244,8 @@ function saveNote(n) {
     note.tables = n.tables.map((t) => sanitize(t));
   if (n.tags?.length)
     note.tags = n.tags.map((t) => sanitize(t));
+  if (n.team || same?.team)
+    note.team = true;
   appendLine(notesFile(), note);
   return note;
 }
@@ -255,6 +269,34 @@ function allNotes() {
       byId.set(r.id, r);
   }
   return [...byId.values()];
+}
+function listSessions(project) {
+  const root = join(dataDir(), "obs");
+  if (!existsSync(root))
+    return [];
+  const out = [];
+  for (const p of project ? [project] : readdirSync(root)) {
+    const dir = join(root, p);
+    if (!existsSync(dir) || !statSync(dir).isDirectory())
+      continue;
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith(".jsonl"))
+        continue;
+      const recs = readLines(join(dir, f));
+      if (!recs.length)
+        continue;
+      out.push({
+        project: p,
+        session: recs[0].session,
+        start: recs[0].ts,
+        end: recs[recs.length - 1].ts,
+        records: recs.length,
+        errors: recs.filter((r) => r.error).length,
+        firstPrompt: recs.find((r) => r.tool === "prompt")?.input
+      });
+    }
+  }
+  return out.sort((a, b) => b.end - a.end);
 }
 function readRecap(project) {
   try {
@@ -385,7 +427,7 @@ function search(docs, query, limit = 5, minIdf = 3) {
 }
 
 // src/team.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, readdirSync as readdirSync2, writeFileSync as writeFileSync2 } from "fs";
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, readdirSync as readdirSync2, statSync as statSync2, writeFileSync as writeFileSync2 } from "fs";
 import { homedir as homedir2 } from "os";
 import { dirname as dirname2, join as join2, resolve as resolve2 } from "path";
 var TEAM_KINDS = ["caveat", "metric", "query", "decision", "fact", "fix", "note"];
@@ -402,21 +444,80 @@ function teamDirs(cwd) {
   if (process.env.ENGRAM_TEAM_DIR)
     return [resolve2(process.env.ENGRAM_TEAM_DIR)];
   const dirs = [];
+  const local = projectStore(cwd);
+  if (local)
+    dirs.push(local);
+  if (existsSync2(sharedStore()))
+    dirs.push(sharedStore());
+  return dirs;
+}
+function sharedStore() {
+  return resolve2(process.env.ENGRAM_TEAM_DIR || join2(homedir2(), ".claude", "engram-team"));
+}
+function projectStore(cwd) {
   const root = projectRoot(cwd);
   let dir = resolve2(cwd);
   for (;; ) {
-    if (existsSync2(join2(dir, ".engram"))) {
-      dirs.push(join2(dir, ".engram"));
-      break;
-    }
+    if (existsSync2(join2(dir, ".engram")))
+      return join2(dir, ".engram");
     if (dir === root || dirname2(dir) === dir)
-      break;
+      return;
     dir = dirname2(dir);
   }
-  const global = join2(homedir2(), ".claude", "engram-team");
-  if (existsSync2(global))
-    dirs.push(global);
-  return dirs;
+}
+function gitRemote(root) {
+  try {
+    let gitDir = join2(root, ".git");
+    if (statSync2(gitDir).isFile()) {
+      gitDir = resolve2(root, readFileSync2(gitDir, "utf-8").replace(/^gitdir:\s*/, "").trim());
+      const common = join2(gitDir, "commondir");
+      if (existsSync2(common))
+        gitDir = resolve2(gitDir, readFileSync2(common, "utf-8").trim());
+    }
+    const config = readFileSync2(join2(gitDir, "config"), "utf-8");
+    const remotes = [...config.matchAll(/\[remote "([^"]+)"\]([^[]*)/g)].map((m) => ({
+      name: m[1],
+      url: m[2].match(/^\s*url\s*=\s*(.+)$/m)?.[1].trim()
+    }));
+    return (remotes.find((r) => r.name === "origin") || remotes[0])?.url;
+  } catch {
+    return;
+  }
+}
+function normalizeRemote(url) {
+  return url.trim().replace(/^[a-z+]+:\/\//i, "").replace(/^[^@/]+@/, "").replace(/^([^/:]+):(?!\d+\/)/, "$1/").replace(/^([^/:]+):\d+\//, "$1/").replace(/\.git$/, "").replace(/\/+$/, "").toLowerCase();
+}
+function globMatch(pattern, text) {
+  const re = pattern.trim().toLowerCase().replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${re}$`).test(text.toLowerCase());
+}
+function teamScope(cwd) {
+  if (projectStore(cwd))
+    return { inScope: true, reason: "project has a .engram/ folder" };
+  const file = join2(sharedStore(), "scope.json");
+  if (!existsSync2(file))
+    return { inScope: true, reason: "no scope.json in the team store (all projects)" };
+  let cfg;
+  try {
+    cfg = JSON.parse(readFileSync2(file, "utf-8"));
+  } catch (e) {
+    return { inScope: false, reason: `scope.json is invalid: ${e.message}` };
+  }
+  const root = projectRoot(cwd);
+  const remote = gitRemote(root);
+  const norm = remote ? normalizeRemote(remote) : "";
+  const hitProject = norm ? (cfg.projects || []).find((p) => globMatch(normalizeRemote(p), norm)) : undefined;
+  if (hitProject)
+    return { inScope: true, reason: `remote ${norm} matches "${hitProject}"` };
+  const path = root.replace(/\\/g, "/");
+  const home = homedir2().replace(/\\/g, "/");
+  const hitPath = (cfg.paths || []).find((p) => globMatch(p.replace(/^~(?=\/|$)/, home).replace(/\\/g, "/"), path));
+  if (hitPath)
+    return { inScope: true, reason: `path ${path} matches "${hitPath}"` };
+  return {
+    inScope: false,
+    reason: `not listed in scope.json (remote: ${norm || "none"}, path: ${path})`
+  };
 }
 function parseFrontmatter(content) {
   const text = content.replace(/^﻿/, "").replace(/\r\n/g, `
@@ -481,6 +582,8 @@ var asText = (v) => Array.isArray(v) ? v.join(", ") || undefined : v || undefine
 function loadTeam(cwd) {
   const byId = new Map;
   const skipped = [];
+  if (!teamScope(cwd).inScope)
+    return { items: [], skipped };
   for (const base of [...teamDirs(cwd)].reverse()) {
     for (const kind of TEAM_KINDS) {
       const dir = join2(base, FOLDER[kind]);
@@ -574,7 +677,6 @@ var RETENTION_DAYS = Number(process.env.ENGRAM_RETENTION_DAYS) > 0 ? Number(proc
 var PROMPT_BUDGET = 1500;
 var SESSION_BUDGET = 6000;
 var TRIVIAL = new Set("ls cd pwd cat head tail less more echo printf which whoami date clear true sleep wc file tree".split(" "));
-var day = (ts) => new Date(ts).toISOString().slice(0, 10);
 var oneLine = (s, max) => clip(s.replace(/\s+/g, " ").trim(), max);
 function extractTables(sql) {
   const out = new Set;
@@ -585,10 +687,27 @@ function extractTables(sql) {
   }
   return [...out];
 }
+var FILE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+var CODE_FILE = /\.(sql|py|r|ipynb|ya?ml|sh|jinja2?|j2|md|js|ts)$/i;
+function fileText(tool, ti) {
+  const path = typeof ti.file_path === "string" ? ti.file_path : ti.notebook_path;
+  if (typeof path !== "string")
+    return null;
+  const head = `${tool.toLowerCase()} ${path}`;
+  if (!CODE_FILE.test(path))
+    return head;
+  const edits = Array.isArray(ti.edits) ? ti.edits.map((e) => e.new_string) : [];
+  const text = [ti.content, ti.new_string, ti.new_source, ...edits].filter((v) => typeof v === "string").join(`
+`);
+  return text ? `${head}
+${text}` : head;
+}
 function toolText(input) {
   const ti = input.tool_input || {};
   if (input.tool_name === "Bash")
     return typeof ti.command === "string" ? ti.command : null;
+  if (FILE_TOOLS.has(input.tool_name || ""))
+    return fileText(input.tool_name, ti);
   const fields = [];
   const visit = (obj, depth) => {
     for (const [k, v] of Object.entries(obj)) {
@@ -632,8 +751,10 @@ function errorHeadline(error) {
     return error.trim();
   return /traceback|^\s*at\s|stack trace/i.test(error) ? lines[lines.length - 1] : lines[0];
 }
-function detectFix(history, success) {
-  const isRun = (o) => o.id !== success.id && o.tool !== "prompt";
+function detectFix(history, success, team = false) {
+  if (FILE_TOOLS.has(success.tool))
+    return null;
+  const isRun = (o) => o.id !== success.id && o.tool !== "prompt" && !FILE_TOOLS.has(o.tool);
   for (let i = history.length - 1;i >= 0 && i >= history.length - 15; i--) {
     const prev = history[i];
     if (!isRun(prev) || !similar(prev, success))
@@ -660,7 +781,8 @@ Worked:
 \`\`\`
 ${success.input}
 \`\`\``,
-      tables: [...new Set([...extractTables(prev.input), ...extractTables(success.input)])]
+      tables: [...new Set([...extractTables(prev.input), ...extractTables(success.input)])],
+      team
     });
   }
   return null;
@@ -680,7 +802,7 @@ function onToolUse(input) {
     error: input.hook_event_name === "PostToolUseFailure" ? input.error || "failed" : undefined
   });
   if (!obs.error)
-    detectFix(sessionObservations(project, input.session_id), obs);
+    detectFix(sessionObservations(project, input.session_id), obs, teamScope(input.cwd).inScope);
 }
 function onStop(input) {
   if (!input.last_assistant_message)
@@ -725,7 +847,7 @@ function buildDocs(cwd, opts = {}) {
     docs.push({
       id: o.id,
       source: "obs",
-      kind: o.tool === "prompt" ? "prompt" : o.error ? "error" : "run",
+      kind: o.tool === "prompt" ? "prompt" : o.error ? "error" : FILE_TOOLS.has(o.tool) ? "file" : "run",
       title: o.tool,
       text: `${o.input} ${o.error || ""}`,
       ts: o.ts,
@@ -745,8 +867,8 @@ function formatHit(h) {
   if (d.source === "team")
     return `- [team ${d.kind}] ${d.title}: ${oneLine(text, 160)} (${d.ref})`;
   if (d.source === "note")
-    return `- [${d.kind} ${day(d.ts)} ${d.id}] ${d.title}: ${oneLine(text, 220)}`;
-  return `- [past ${d.kind} ${day(d.ts)}] ${oneLine(text, 240)}`;
+    return `- [${d.kind} ${localDay(d.ts)} ${d.id}] ${d.title}: ${oneLine(text, 220)}`;
+  return `- [past ${d.kind} ${localDay(d.ts)}] ${oneLine(text, 240)}`;
 }
 function uniqueLines(hits, max) {
   const seen = new Set;
@@ -827,7 +949,7 @@ function onSessionStart(input) {
   const parts = [];
   const recap = readRecap(project);
   if (recap && recap.session !== input.session_id && input.source !== "compact") {
-    const lines = [`engram: previous session in this project (${day(recap.ts)}):`];
+    const lines = [`engram: previous session in this project (${localDay(recap.ts)}):`];
     if (recap.firstPrompt)
       lines.push(`- started with: ${oneLine(recap.firstPrompt, 200)}`);
     if (recap.lastPrompt && recap.lastPrompt !== recap.firstPrompt)
@@ -843,8 +965,12 @@ function onSessionStart(input) {
 `).length - 300);
   if (index)
     parts.push(index);
-  const notes = allNotes().length;
-  parts.push(`engram: personal memory holds ${notes} saved note(s); matching ones are added to prompts automatically. ` + "Durable findings (data caveats, metric definitions, fixes) can be saved with /engram:save.");
+  const notes = allNotes();
+  const recent = notes.filter((n) => n.project === project).sort((a, b) => b.ts - a.ts).slice(0, 5).map((n) => `- [${n.kind} ${n.id}] ${oneLine(n.title, 140)}`);
+  if (recent.length)
+    parts.push(["engram: latest notes saved in this project:", ...recent].join(`
+`));
+  parts.push(`engram: personal memory holds ${notes.length} saved note(s); matching ones are added to prompts automatically. ` + "Durable findings (data caveats, metric definitions, fixes) can be saved with /engram:save; past sessions are listed by /engram:history.");
   return parts.join(`
 
 `);
@@ -855,9 +981,11 @@ var USAGE = `engram <command>
   recall <words...> [--limit N]        search personal memory and team knowledge
   save --kind K --title T [--tables a,b] [--tags x,y] [--body TEXT | stdin]
                                        kinds: ${KINDS.join(", ")}
-  forget <note-id>                     hide a saved note
-  share <note-id> [--to DIR]           write a note as a team Markdown file
-  status                               show what is stored and loaded
+  forget <note-id>                     erase a saved note
+  share [<note-id>] [--to DIR]         list shareable notes, or write one as a team Markdown file
+  history [--all] [--limit N]          list past sessions (this project, or all projects)
+  history <session-id|YYYY-MM-DD>      show what happened in a session or on a day
+  status                               show what is stored, loaded and in team scope
   hook <session-start|prompt|tool|stop>  used by hooks/hooks.json (reads JSON on stdin)`;
 var OPTIONS = new Set(["kind", "title", "tables", "tags", "body", "limit", "to"]);
 function parse(argv) {
@@ -928,14 +1056,30 @@ function save(opt) {
     title: opt.title,
     body: body.trim() || opt.title,
     tables: list(opt.tables),
-    tags: list(opt.tags)
+    tags: list(opt.tags),
+    team: teamScope(process.cwd()).inScope
   });
-  return `Saved ${note.kind} ${note.id}: ${note.title}`;
+  return `Saved ${note.kind} ${note.id}: ${note.title}${note.team ? "" : " (personal only: outside the team scope)"}`;
 }
 function share(id, opt) {
+  if (!id) {
+    const shared = new Set(loadTeam(process.cwd()).items.map((t) => t.id));
+    const candidates = allNotes().filter((n) => n.team && !shared.has(n.id)).sort((a, b) => b.ts - a.ts).slice(0, 20);
+    if (!candidates.length)
+      return "No shareable notes. Notes saved inside the team scope appear here.";
+    return [
+      "Shareable notes (saved inside the team scope, not shared yet):",
+      ...candidates.map((n) => `- ${n.id} [${n.kind} ${localDay(n.ts)}] ${n.title}`),
+      "Share one with: engram share <note-id>"
+    ].join(`
+`);
+  }
   const note = allNotes().find((n) => n.id === id);
   if (!note)
     throw new Error(`No saved note with id "${id}". Find ids with: engram recall <words>`);
+  if (!note.team) {
+    throw new Error(`${id} was saved outside the team scope, so it stays personal. ` + "Add the project to scope.json in the team repository (or add a .engram/ folder) and save it again there.");
+  }
   const base = opt.to || teamDirs(process.cwd())[0];
   if (!base) {
     throw new Error("No team store found. Clone the team repo to ~/.claude/engram-team, create .engram/ in the project, or pass --to DIR.");
@@ -953,6 +1097,35 @@ function share(id, opt) {
   return `Wrote ${path}
 Review it, then commit and open a PR in that repository to share it with the team.`;
 }
+function history(pos, opt) {
+  const project = projectId(process.cwd());
+  const target = pos.find((p) => p !== "--all");
+  if (!target) {
+    const all = pos.includes("--all");
+    const sessions = listSessions(all ? undefined : project).slice(0, Number(opt.limit) || 15);
+    if (!sessions.length)
+      return "No recorded sessions.";
+    return [
+      `Sessions${all ? "" : ` in ${project}`} (newest first):`,
+      ...sessions.map((s) => `- ${s.session.slice(0, 8)} ${localTime(s.start)} → ${localTime(s.end).slice(11)} ` + `${s.records} records${s.errors ? `, ${s.errors} errors` : ""}${all ? ` [${s.project}]` : ""}` + (s.firstPrompt ? ` — ${s.firstPrompt.replace(/\s+/g, " ").slice(0, 100)}` : "")),
+      "Show one with: engram history <session-id or YYYY-MM-DD>"
+    ].join(`
+`);
+  }
+  const byDay = /^\d{4}-\d{2}-\d{2}$/.test(target);
+  const recs = projectObservations(project).filter((o) => byDay ? localDay(o.ts) === target : o.session.startsWith(target)).sort((a, b) => a.ts - b.ts).slice(-200);
+  if (!recs.length)
+    return `Nothing recorded for "${target}" in ${project}.`;
+  return [
+    `Timeline for ${target} in ${project}:`,
+    ...recs.map((o) => {
+      const what = o.input.replace(/\s+/g, " ").slice(0, 160);
+      const err = o.error ? ` ✗ ${o.error.replace(/\s+/g, " ").slice(0, 120)}` : "";
+      return `- ${localTime(o.ts).slice(11)} ${byDay ? `${o.session.slice(0, 8)} ` : ""}${o.tool}: ${what}${err}`;
+    })
+  ].join(`
+`);
+}
 function status() {
   const cwd = process.cwd();
   const project = projectId(cwd);
@@ -966,6 +1139,7 @@ function status() {
     `- project: ${project}`,
     `- saved notes: ${notes.length}${byKind.length ? ` (${byKind.map(([k, c]) => `${k} ${c}`).join(", ")})` : ""}`,
     `- captured observations for this project: ${obs.length} (errors: ${obs.filter((o) => o.error).length})`,
+    `- team scope: ${teamScope(cwd).inScope ? "in scope" : "out of scope"} (${teamScope(cwd).reason})`,
     `- team stores: ${teamDirs(cwd).join(", ") || "none"}`,
     `- team items loaded: ${items.length}`
   ];
@@ -995,6 +1169,8 @@ function main() {
       out = forget(pos[0] || "") ? `Forgot ${pos[0]}` : `No saved note with id "${pos[0]}"`;
     else if (cmd === "share")
       out = share(pos[0], opt);
+    else if (cmd === "history")
+      out = history(pos, opt);
     else if (cmd === "status")
       out = status();
     else

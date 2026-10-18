@@ -1,0 +1,26 @@
+{
+  "session_id": "11111111-1111-1111-1111-111111111111",
+  "transcript_path": "/tmp/transcript.jsonl",
+  "cwd": "/work/analytics",
+  "prompt_id": "6f9bc44a-1ece-46ce-8e09-921c41088fe8",
+  "permission_mode": "bypassPermissions",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/work/analytics/q.sql",
+    "content": "select 1 from dim_users\n"
+  },
+  "tool_response": {
+    "type": "create",
+    "filePath": "/work/analytics/q.sql",
+    "content": "select 1 from dim_users\n",
+    "structuredPatch": [],
+    "originalFile": null,
+    "userModified": false
+  },
+  "tool_use_id": "toolu_01SMXnkmvTqYPsuUD1j3PpgD",
+  "duration_ms": 10
+}

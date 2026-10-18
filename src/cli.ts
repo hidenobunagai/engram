@@ -15,20 +15,25 @@ import {
   allNotes,
   dataDir,
   forget,
+  listSessions,
+  localDay,
+  localTime,
   projectId,
   projectObservations,
   saveNote,
 } from "./memory";
 import { search } from "./search";
-import { loadTeam, teamDirs, writeTeamItem } from "./team";
+import { loadTeam, teamDirs, teamScope, writeTeamItem } from "./team";
 
 const USAGE = `engram <command>
   recall <words...> [--limit N]        search personal memory and team knowledge
   save --kind K --title T [--tables a,b] [--tags x,y] [--body TEXT | stdin]
                                        kinds: ${KINDS.join(", ")}
-  forget <note-id>                     hide a saved note
-  share <note-id> [--to DIR]           write a note as a team Markdown file
-  status                               show what is stored and loaded
+  forget <note-id>                     erase a saved note
+  share [<note-id>] [--to DIR]         list shareable notes, or write one as a team Markdown file
+  history [--all] [--limit N]          list past sessions (this project, or all projects)
+  history <session-id|YYYY-MM-DD>      show what happened in a session or on a day
+  status                               show what is stored, loaded and in team scope
   hook <session-start|prompt|tool|stop>  used by hooks/hooks.json (reads JSON on stdin)`;
 
 const OPTIONS = new Set(["kind", "title", "tables", "tags", "body", "limit", "to"]);
@@ -105,13 +110,35 @@ function save(opt: Record<string, string>): string {
     body: body.trim() || opt.title,
     tables: list(opt.tables),
     tags: list(opt.tags),
+    team: teamScope(process.cwd()).inScope,
   });
-  return `Saved ${note.kind} ${note.id}: ${note.title}`;
+  return `Saved ${note.kind} ${note.id}: ${note.title}${note.team ? "" : " (personal only: outside the team scope)"}`;
 }
 
+/** Without an id: the newest notes saved inside the team scope that are not in the team store yet. */
 function share(id: string | undefined, opt: Record<string, string>): string {
+  if (!id) {
+    const shared = new Set(loadTeam(process.cwd()).items.map((t) => t.id));
+    const candidates = allNotes()
+      .filter((n) => n.team && !shared.has(n.id))
+      .sort((a, b) => b.ts - a.ts)
+      .slice(0, 20);
+    if (!candidates.length)
+      return "No shareable notes. Notes saved inside the team scope appear here.";
+    return [
+      "Shareable notes (saved inside the team scope, not shared yet):",
+      ...candidates.map((n) => `- ${n.id} [${n.kind} ${localDay(n.ts)}] ${n.title}`),
+      "Share one with: engram share <note-id>",
+    ].join("\n");
+  }
   const note = allNotes().find((n) => n.id === id);
   if (!note) throw new Error(`No saved note with id "${id}". Find ids with: engram recall <words>`);
+  if (!note.team) {
+    throw new Error(
+      `${id} was saved outside the team scope, so it stays personal. ` +
+        "Add the project to scope.json in the team repository (or add a .engram/ folder) and save it again there.",
+    );
+  }
   const base = opt.to || teamDirs(process.cwd())[0];
   if (!base) {
     throw new Error(
@@ -131,6 +158,40 @@ function share(id: string | undefined, opt: Record<string, string>): string {
   return `Wrote ${path}\nReview it, then commit and open a PR in that repository to share it with the team.`;
 }
 
+function history(pos: string[], opt: Record<string, string>): string {
+  const project = projectId(process.cwd());
+  const target = pos.find((p) => p !== "--all");
+  if (!target) {
+    const all = pos.includes("--all");
+    const sessions = listSessions(all ? undefined : project).slice(0, Number(opt.limit) || 15);
+    if (!sessions.length) return "No recorded sessions.";
+    return [
+      `Sessions${all ? "" : ` in ${project}`} (newest first):`,
+      ...sessions.map(
+        (s) =>
+          `- ${s.session.slice(0, 8)} ${localTime(s.start)} → ${localTime(s.end).slice(11)} ` +
+          `${s.records} records${s.errors ? `, ${s.errors} errors` : ""}${all ? ` [${s.project}]` : ""}` +
+          (s.firstPrompt ? ` — ${s.firstPrompt.replace(/\s+/g, " ").slice(0, 100)}` : ""),
+      ),
+      "Show one with: engram history <session-id or YYYY-MM-DD>",
+    ].join("\n");
+  }
+  const byDay = /^\d{4}-\d{2}-\d{2}$/.test(target);
+  const recs = projectObservations(project)
+    .filter((o) => (byDay ? localDay(o.ts) === target : o.session.startsWith(target)))
+    .sort((a, b) => a.ts - b.ts)
+    .slice(-200);
+  if (!recs.length) return `Nothing recorded for "${target}" in ${project}.`;
+  return [
+    `Timeline for ${target} in ${project}:`,
+    ...recs.map((o) => {
+      const what = o.input.replace(/\s+/g, " ").slice(0, 160);
+      const err = o.error ? ` ✗ ${o.error.replace(/\s+/g, " ").slice(0, 120)}` : "";
+      return `- ${localTime(o.ts).slice(11)} ${byDay ? `${o.session.slice(0, 8)} ` : ""}${o.tool}: ${what}${err}`;
+    }),
+  ].join("\n");
+}
+
 function status(): string {
   const cwd = process.cwd();
   const project = projectId(cwd);
@@ -146,6 +207,7 @@ function status(): string {
     `- project: ${project}`,
     `- saved notes: ${notes.length}${byKind.length ? ` (${byKind.map(([k, c]) => `${k} ${c}`).join(", ")})` : ""}`,
     `- captured observations for this project: ${obs.length} (errors: ${obs.filter((o) => o.error).length})`,
+    `- team scope: ${teamScope(cwd).inScope ? "in scope" : "out of scope"} (${teamScope(cwd).reason})`,
     `- team stores: ${teamDirs(cwd).join(", ") || "none"}`,
     `- team items loaded: ${items.length}`,
   ];
@@ -171,6 +233,7 @@ function main(): void {
     else if (cmd === "forget")
       out = forget(pos[0] || "") ? `Forgot ${pos[0]}` : `No saved note with id "${pos[0]}"`;
     else if (cmd === "share") out = share(pos[0], opt);
+    else if (cmd === "history") out = history(pos, opt);
     else if (cmd === "status") out = status();
     else out = USAGE;
     console.log(out);

@@ -1,0 +1,37 @@
+{
+  "session_id": "11111111-1111-1111-1111-111111111111",
+  "transcript_path": "/tmp/transcript.jsonl",
+  "cwd": "/work/analytics",
+  "prompt_id": "6f9bc44a-1ece-46ce-8e09-921c41088fe8",
+  "permission_mode": "bypassPermissions",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "/work/analytics/q.sql",
+    "old_string": "select 1 from dim_users",
+    "new_string": "select user_id from dim_users",
+    "replace_all": false
+  },
+  "tool_response": {
+    "filePath": "/work/analytics/q.sql",
+    "oldString": "select 1 from dim_users",
+    "newString": "select user_id from dim_users",
+    "originalFile": "select 1 from dim_users\n",
+    "structuredPatch": [
+      {
+        "oldStart": 1,
+        "oldLines": 1,
+        "newStart": 1,
+        "newLines": 1,
+        "lines": ["-select 1 from dim_users", "+select user_id from dim_users"]
+      }
+    ],
+    "userModified": false,
+    "replaceAll": false
+  },
+  "tool_use_id": "toolu_01V1nVqDVKwmwDDXCoAr5AX6",
+  "duration_ms": 6
+}

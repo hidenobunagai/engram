@@ -225,3 +225,66 @@ describe("review regressions", () => {
     );
   });
 });
+
+describe("file edits, history and dedupe", () => {
+  it("captures SQL written to files but only the path for data files", () => {
+    const { work } = sandbox();
+    const fx = (name: string) =>
+      JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", `${name}.json`), "utf-8"));
+    onToolUse({ ...fx("post-tool-use-write"), cwd: work });
+    onToolUse({ ...fx("post-tool-use-edit"), cwd: work });
+    onToolUse(
+      ev(work, "s1", {
+        hook_event_name: "PostToolUse",
+        tool_name: "Write",
+        tool_input: { file_path: join(work, "out.csv"), content: "name,email\nTaro,t@x.jp" },
+      }),
+    );
+    expect(
+      projectObservations(projectId(work))
+        .map((o) => o.input)
+        .sort(),
+    ).toEqual([
+      "edit /work/analytics/q.sql\nselect user_id from dim_users",
+      `write ${join(work, "out.csv")}`,
+      "write /work/analytics/q.sql\nselect 1 from dim_users\n",
+    ]);
+  });
+
+  it("does not pair failed edits as fixes", () => {
+    const { work } = sandbox();
+    const edit = (error?: string) =>
+      onToolUse(
+        ev(work, "s1", {
+          hook_event_name: error ? "PostToolUseFailure" : "PostToolUse",
+          tool_name: "Edit",
+          tool_input: { file_path: "/w/q.sql", old_string: "a", new_string: "b" },
+          error,
+        }),
+      );
+    edit("String to replace not found");
+    edit();
+    expect(allNotes().length).toBe(0);
+  });
+
+  it("refreshes instead of duplicating an identical note", () => {
+    sandbox();
+    const a = saveNote({ project: "p", kind: "caveat", title: "T", body: "B" });
+    const b = saveNote({ project: "p", kind: "caveat", title: "T", body: "B" });
+    expect(b.id).toBe(a.id);
+    expect(allNotes().length).toBe(1);
+  });
+
+  it("lists this project's latest notes at session start", () => {
+    const { work } = sandbox();
+    saveNote({
+      project: projectId(work),
+      kind: "caveat",
+      title: "Soft deletes in dim_users",
+      body: "b",
+    });
+    expect(onSessionStart(ev(work, "s1", { source: "startup" }))).toContain(
+      "] Soft deletes in dim_users",
+    );
+  });
+});
