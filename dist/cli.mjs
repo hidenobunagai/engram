@@ -429,7 +429,9 @@ function search(docs, query, limit = 5, minIdf = 3) {
 
 // src/team.ts
 import {
+  closeSync as closeSync2,
   existsSync as existsSync2,
+  openSync as openSync2,
   mkdirSync as mkdirSync2,
   readFileSync as readFileSync2,
   readdirSync as readdirSync2,
@@ -459,9 +461,30 @@ function readConfig() {
     return {};
   }
 }
-function writeConfig(c) {
-  writeAtomic(configFile(), `${JSON.stringify(c, null, 2)}
+function updateConfig(change) {
+  const lock = `${configFile()}.lock`;
+  mkdirSync2(dataDir(), { recursive: true });
+  const deadline = Date.now() + 3000;
+  for (;; ) {
+    try {
+      closeSync2(openSync2(lock, "wx"));
+      break;
+    } catch {
+      try {
+        if (Date.now() - statSync2(lock).mtimeMs > 1e4)
+          unlinkSync2(lock);
+      } catch {}
+      if (Date.now() > deadline)
+        throw new Error(`config is locked: ${lock}`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+  try {
+    writeAtomic(configFile(), `${JSON.stringify(change(readConfig()), null, 2)}
 `);
+  } finally {
+    unlinkSync2(lock);
+  }
 }
 function writeAtomic(file, text) {
   mkdirSync2(dirname2(file), { recursive: true });
@@ -469,14 +492,17 @@ function writeAtomic(file, text) {
   writeFileSync2(tmp, text, "utf-8");
   renameSync2(tmp, file);
 }
+var inPluginHook = () => !!process.env.CLAUDE_PLUGIN_ROOT;
 function persistPluginOption() {
-  const opt = process.env.CLAUDE_PLUGIN_OPTION_TEAM_DIR?.trim();
-  const c = readConfig();
-  if (opt && opt !== c.teamDir)
-    writeConfig({ ...c, teamDir: opt });
+  if (!inPluginHook())
+    return;
+  const opt = process.env.CLAUDE_PLUGIN_OPTION_TEAM_DIR?.trim() || undefined;
+  if (opt === readConfig().teamDir)
+    return;
+  updateConfig(({ teamDir, ...rest }) => opt ? { ...rest, teamDir: opt } : rest);
 }
 function sharedStore() {
-  const configured = process.env.ENGRAM_TEAM_DIR?.trim() || process.env.CLAUDE_PLUGIN_OPTION_TEAM_DIR?.trim() || readConfig().teamDir;
+  const configured = process.env.ENGRAM_TEAM_DIR?.trim() || (inPluginHook() ? process.env.CLAUDE_PLUGIN_OPTION_TEAM_DIR?.trim() : readConfig().teamDir);
   if (configured)
     return resolve2(configured);
   const fallback = join2(homedir2(), ".claude", "engram-team");
@@ -594,7 +620,8 @@ function teamScope(cwd) {
   const root = projectRoot(cwd);
   const remote = gitRemote(root);
   const norm = remote ? normalizeRemote(remote) : "";
-  const picked = (readConfig().projects || []).find((p) => samePath(p.root, root) || !!norm && p.remote === norm);
+  const team = sharedStore();
+  const picked = (readConfig().projects || []).find((p) => !!p.team && samePath(p.team, team) && (samePath(p.root, root) || !!norm && p.remote === norm));
   if (picked)
     return { inScope: true, reason: "selected with /engram:scope on" };
   const snap = readSnapshot();
@@ -615,12 +642,17 @@ function teamScope(cwd) {
   };
 }
 function setSelected(cwd, on) {
+  const team = sharedStore();
+  if (!team)
+    throw new Error("No team folder configured, so there is nothing to select for.");
   const root = projectRoot(cwd);
   const remote = gitRemote(root);
   const norm = remote ? normalizeRemote(remote) : undefined;
-  const c = readConfig();
-  const rest = (c.projects || []).filter((p) => !samePath(p.root, root) && !(norm && p.remote === norm));
-  writeConfig({ ...c, projects: on ? [...rest, norm ? { root, remote: norm } : { root }] : rest });
+  updateConfig((c) => {
+    const rest = (c.projects || []).filter((p) => !(samePath(p.team || "", team) && (samePath(p.root, root) || !!norm && p.remote === norm)));
+    const entry = norm ? { root, remote: norm, team } : { root, team };
+    return { ...c, projects: on ? [...rest, entry] : rest };
+  });
 }
 function parseFrontmatter(content) {
   const text = content.replace(/^﻿/, "").replace(/\r\n/g, `
@@ -762,7 +794,7 @@ function serialize(item) {
   return lines.join(`
 `);
 }
-function writeTeamItem(base, item) {
+function planTeamWrite(base, item) {
   const clean = {
     ...item,
     title: sanitize(item.title),
@@ -772,17 +804,24 @@ function writeTeamItem(base, item) {
     tags: item.tags.map(sanitize)
   };
   const dir = join2(base, FOLDER[clean.kind]);
-  if (!existsSync2(dir))
-    mkdirSync2(dir, { recursive: true });
+  const text = serialize(clean);
+  const files = existsSync2(dir) ? readdirSync2(dir).filter((f) => f.endsWith(".md")) : [];
+  for (const f of files) {
+    const content = readFileSync2(join2(dir, f), "utf-8");
+    if (parseFrontmatter(content).meta.id === clean.id)
+      return { path: join2(dir, f), text, existing: content };
+  }
   const stem = slugify(clean.title) || clean.id;
   let path = join2(dir, `${stem}.md`);
-  for (let n = 2;existsSync2(path); n++) {
-    if (parseFrontmatter(readFileSync2(path, "utf-8")).meta.id === clean.id)
-      break;
+  for (let n = 2;existsSync2(path); n++)
     path = join2(dir, `${stem}-${n}.md`);
-  }
-  writeFileSync2(path, serialize(clean), "utf-8");
-  return path;
+  return { path, text };
+}
+function writeTeamItem(base, item) {
+  const plan = planTeamWrite(base, item);
+  mkdirSync2(dirname2(plan.path), { recursive: true });
+  writeFileSync2(plan.path, plan.text, "utf-8");
+  return plan.path;
 }
 
 // src/hooks.ts
@@ -947,7 +986,9 @@ function onStop(input) {
 }
 var SNAPSHOT_TTL = 10 * 60000;
 function onRefresh() {
-  persistPluginOption();
+  try {
+    persistPluginOption();
+  } catch {}
   refreshSnapshot(SNAPSHOT_TTL);
 }
 function buildDocs(cwd, opts = {}) {
@@ -1085,7 +1126,9 @@ function teamIndex(items, skipped, budget) {
 `);
 }
 function onSessionStart(input) {
-  persistPluginOption();
+  try {
+    persistPluginOption();
+  } catch {}
   try {
     pruneObservations(RETENTION_DAYS, input.session_id);
   } catch {}
@@ -1105,6 +1148,8 @@ function onSessionStart(input) {
 `));
   }
   const { items, skipped } = loadTeam(input.cwd);
+  if (sharedStore() && !teamScope(input.cwd).inScope)
+    parts.push("engram: a team folder is set, but this project is not selected, so it stays personal. /engram:scope on includes it.");
   const index = teamIndex(items, skipped.length, SESSION_BUDGET - parts.join(`
 `).length - 300);
   if (index)
@@ -1210,7 +1255,7 @@ function save(opt) {
   return `Saved ${note.kind} ${note.id}: ${note.title}${personal}`;
 }
 var shareable = (n) => !!n.root && teamScope(n.root).inScope;
-function share(id, opt, yes) {
+function share(id, opt, yes, update = false) {
   const { error } = refreshSnapshot(0);
   if (error)
     throw new Error(error);
@@ -1232,10 +1277,13 @@ function share(id, opt, yes) {
   if (!shareable(note)) {
     throw new Error(`${id} comes from a project outside the team scope (${note.root || "unknown project"}), so it stays personal. ` + "Run /engram:scope on in that project (or list it in the team's scope.json), then share it from there.");
   }
-  const base = opt.to || sharedStore() || projectStore(process.cwd());
+  const local = projectStore(process.cwd());
+  const base = opt.to || sharedStore() || local;
   if (!base) {
     throw new Error("No team folder configured. Set it with: claude plugin configure engram (team_dir), or pass --to DIR.");
   }
+  if (base === local && !opt.to && !samePath(note.root || "", projectRoot(process.cwd())))
+    throw new Error(`${id} comes from ${note.root}; share it from that project, or pass --to DIR.`);
   const item = {
     id: note.id,
     kind: note.kind,
@@ -1246,11 +1294,17 @@ function share(id, opt, yes) {
     created_at: new Date(note.ts).toISOString().slice(0, 10),
     body: note.body
   };
-  if (!yes)
-    return `Preview (nothing written yet) — would write to ${base}:
+  const plan = planTeamWrite(base, item);
+  const changed = plan.existing !== undefined && plan.existing !== plan.text;
+  if (!yes) {
+    const action = plan.existing === undefined ? `write ${plan.path}` : changed ? `REPLACE ${plan.path} (it differs from this note; a teammate may have edited it)` : `leave ${plan.path} unchanged`;
+    return `Preview (nothing written yet) — would ${action}:
 
-${serialize(item)}
-Run again with --yes to publish it to the team.`;
+${plan.text}
+Run again with --yes to publish it to the team${changed ? " (add --update to replace the existing file)" : ""}.`;
+  }
+  if (changed && !update)
+    throw new Error(`${plan.path} already exists with different content. Check it, then run again with --yes --update to replace it.`);
   const path = writeTeamItem(base, item);
   refreshSnapshot(0);
   return `Wrote ${path}
@@ -1299,9 +1353,11 @@ function scope(action) {
     setSelected(cwd, action === "on");
   else if (action)
     throw new Error("Usage: engram scope [on|off]");
-  refreshSnapshot(0);
+  const { error } = refreshSnapshot(0);
   const s = teamScope(cwd);
-  return `${projectRoot(cwd)}: ${s.inScope ? "in" : "out of"} team scope (${s.reason})`;
+  const note = error ? `
+Warning: ${error}; using the last snapshot.` : "";
+  return `${projectRoot(cwd)}: ${s.inScope ? "in" : "out of"} team scope (${s.reason})${note}`;
 }
 function status() {
   const cwd = process.cwd();
@@ -1348,7 +1404,7 @@ function main() {
     else if (cmd === "forget")
       out = forget(pos[0] || "") ? `Forgot ${pos[0]}` : `No saved note with id "${pos[0]}"`;
     else if (cmd === "share")
-      out = share(pos.find((p) => p !== "--yes"), opt, pos.includes("--yes"));
+      out = share(pos.find((p) => !p.startsWith("--")), opt, pos.includes("--yes"), pos.includes("--update"));
     else if (cmd === "scope")
       out = scope(pos[0]);
     else if (cmd === "history")

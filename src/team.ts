@@ -1,5 +1,7 @@
 import {
+  closeSync,
   existsSync,
+  openSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -47,7 +49,8 @@ const FOLDER: Record<Kind, string> = {
  */
 export interface Config {
   teamDir?: string;
-  projects?: Array<{ root: string; remote?: string }>;
+  /** Selections are per team folder: switching folders does not carry them over. */
+  projects?: Array<{ root: string; remote?: string; team: string }>;
 }
 
 const configFile = () => join(dataDir(), "config.json");
@@ -61,8 +64,33 @@ export function readConfig(): Config {
   }
 }
 
-export function writeConfig(c: Config): void {
-  writeAtomic(configFile(), `${JSON.stringify(c, null, 2)}\n`);
+/**
+ * Read-modify-write under a lock file, so parallel hooks and commands do not drop each other's
+ * changes (a lost "scope off" would leave a project shared).
+ */
+export function updateConfig(change: (c: Config) => Config): void {
+  const lock = `${configFile()}.lock`;
+  mkdirSync(dataDir(), { recursive: true });
+  const deadline = Date.now() + 3000;
+  for (;;) {
+    try {
+      closeSync(openSync(lock, "wx"));
+      break;
+    } catch {
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > 10_000) unlinkSync(lock); // left by a crashed writer
+      } catch {
+        // Lock vanished between calls: retry.
+      }
+      if (Date.now() > deadline) throw new Error(`config is locked: ${lock}`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+  try {
+    writeAtomic(configFile(), `${JSON.stringify(change(readConfig()), null, 2)}\n`);
+  } finally {
+    unlinkSync(lock);
+  }
 }
 
 function writeAtomic(file: string, text: string): void {
@@ -72,11 +100,18 @@ function writeAtomic(file: string, text: string): void {
   renameSync(tmp, file);
 }
 
-/** Hooks receive the plugin option; remember it so CLI commands use the same folder. */
+/** Plugin hooks get CLAUDE_PLUGIN_ROOT; commands Claude runs through the Bash tool do not. */
+const inPluginHook = () => !!process.env.CLAUDE_PLUGIN_ROOT;
+
+/**
+ * Hooks receive the plugin option; remember it so CLI commands use the same folder. A cleared option
+ * clears the remembered folder too, which turns team sharing off.
+ */
 export function persistPluginOption(): void {
-  const opt = process.env.CLAUDE_PLUGIN_OPTION_TEAM_DIR?.trim();
-  const c = readConfig();
-  if (opt && opt !== c.teamDir) writeConfig({ ...c, teamDir: opt });
+  if (!inPluginHook()) return;
+  const opt = process.env.CLAUDE_PLUGIN_OPTION_TEAM_DIR?.trim() || undefined;
+  if (opt === readConfig().teamDir) return;
+  updateConfig(({ teamDir, ...rest }) => (opt ? { ...rest, teamDir: opt } : rest));
 }
 
 /**
@@ -85,10 +120,10 @@ export function persistPluginOption(): void {
  * exists. A configured folder is returned without touching it, because it may be slow or offline.
  */
 export function sharedStore(): string | undefined {
+  // Inside a hook the plugin option is authoritative, even when empty (cleared).
   const configured =
     process.env.ENGRAM_TEAM_DIR?.trim() ||
-    process.env.CLAUDE_PLUGIN_OPTION_TEAM_DIR?.trim() ||
-    readConfig().teamDir;
+    (inPluginHook() ? process.env.CLAUDE_PLUGIN_OPTION_TEAM_DIR?.trim() : readConfig().teamDir);
   if (configured) return resolve(configured);
   const fallback = join(homedir(), ".claude", "engram-team");
   return existsSync(fallback) ? fallback : undefined;
@@ -160,7 +195,7 @@ function globMatch(pattern: string, text: string): boolean {
 }
 
 /** Forward slashes; case-insensitive on Windows, where C:\\Work and c:\\work are the same folder. */
-function samePath(a: string, b: string): boolean {
+export function samePath(a: string, b: string): boolean {
   const norm = (p: string) => {
     const s = resolve(p).replace(/\\/g, "/").replace(/\/+$/, "");
     return process.platform === "win32" ? s.toLowerCase() : s;
@@ -274,8 +309,12 @@ export function teamScope(cwd: string): Scope {
   const root = projectRoot(cwd);
   const remote = gitRemote(root);
   const norm = remote ? normalizeRemote(remote) : "";
+  const team = sharedStore()!;
   const picked = (readConfig().projects || []).find(
-    (p) => samePath(p.root, root) || (!!norm && p.remote === norm),
+    (p) =>
+      !!p.team &&
+      samePath(p.team, team) &&
+      (samePath(p.root, root) || (!!norm && p.remote === norm)),
   );
   if (picked) return { inScope: true, reason: "selected with /engram:scope on" };
   const snap = readSnapshot();
@@ -297,16 +336,24 @@ export function teamScope(cwd: string): Scope {
   };
 }
 
-/** Adds or removes the current project from the user's selection. */
+/** Adds or removes the current project from the user's selection for the current team folder. */
 export function setSelected(cwd: string, on: boolean): void {
+  const team = sharedStore();
+  if (!team) throw new Error("No team folder configured, so there is nothing to select for.");
   const root = projectRoot(cwd);
   const remote = gitRemote(root);
   const norm = remote ? normalizeRemote(remote) : undefined;
-  const c = readConfig();
-  const rest = (c.projects || []).filter(
-    (p) => !samePath(p.root, root) && !(norm && p.remote === norm),
-  );
-  writeConfig({ ...c, projects: on ? [...rest, norm ? { root, remote: norm } : { root }] : rest });
+  updateConfig((c) => {
+    const rest = (c.projects || []).filter(
+      (p) =>
+        !(
+          samePath(p.team || "", team) &&
+          (samePath(p.root, root) || (!!norm && p.remote === norm))
+        ),
+    );
+    const entry = norm ? { root, remote: norm, team } : { root, team };
+    return { ...c, projects: on ? [...rest, entry] : rest };
+  });
 }
 
 /** Minimal YAML subset: `key: scalar`, `key: [a, "b"]`, and block lists (`key:` then `- a`). */
@@ -474,7 +521,18 @@ export function serialize(item: Omit<TeamItem, "path">): string {
  * Writes a new team file. Never overwrites: an existing file with another id gets a suffix.
  * Returns the path. In a shared folder the file is visible to the team immediately.
  */
-export function writeTeamItem(base: string, item: Omit<TeamItem, "path">): string {
+export interface TeamWrite {
+  path: string;
+  text: string;
+  /** Current content when a file for this id already exists. */
+  existing?: string;
+}
+
+/**
+ * Where an item would be written: the file that already holds its id, else a new slug file that never
+ * replaces another item (a suffix is added instead).
+ */
+export function planTeamWrite(base: string, item: Omit<TeamItem, "path">): TeamWrite {
   const clean: Omit<TeamItem, "path"> = {
     ...item,
     title: sanitize(item.title),
@@ -484,13 +542,22 @@ export function writeTeamItem(base: string, item: Omit<TeamItem, "path">): strin
     tags: item.tags.map(sanitize),
   };
   const dir = join(base, FOLDER[clean.kind]);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const text = serialize(clean);
+  const files = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".md")) : [];
+  for (const f of files) {
+    const content = readFileSync(join(dir, f), "utf-8");
+    if (parseFrontmatter(content).meta.id === clean.id)
+      return { path: join(dir, f), text, existing: content };
+  }
   const stem = slugify(clean.title) || clean.id;
   let path = join(dir, `${stem}.md`);
-  for (let n = 2; existsSync(path); n++) {
-    if (parseFrontmatter(readFileSync(path, "utf-8")).meta.id === clean.id) break;
-    path = join(dir, `${stem}-${n}.md`);
-  }
-  writeFileSync(path, serialize(clean), "utf-8");
-  return path;
+  for (let n = 2; existsSync(path); n++) path = join(dir, `${stem}-${n}.md`);
+  return { path, text };
+}
+
+export function writeTeamItem(base: string, item: Omit<TeamItem, "path">): string {
+  const plan = planTeamWrite(base, item);
+  mkdirSync(dirname(plan.path), { recursive: true });
+  writeFileSync(plan.path, plan.text, "utf-8");
+  return plan.path;
 }

@@ -226,7 +226,7 @@ describe("shared folder workflow", () => {
     const base = { ...e, ENGRAM_TEAM_DIR: "" };
     // Hooks receive the option from Claude Code; the session-start hook remembers it for the CLI.
     const hook = spawnSync("node", [CLI, "hook", "session-start"], {
-      env: { ...base, CLAUDE_PLUGIN_OPTION_TEAM_DIR: share },
+      env: { ...base, CLAUDE_PLUGIN_ROOT: "/plugin", CLAUDE_PLUGIN_OPTION_TEAM_DIR: share },
       cwd: e.ROOT,
       input: JSON.stringify({
         session_id: "s1",
@@ -256,5 +256,104 @@ describe("shared folder workflow", () => {
     expect(existsSync(join(share, "caveats"))).toBe(false);
     expect(at(["share", id, "--yes"]).stdout).toContain(join(share, "caveats", "refunds.md"));
     expect(at(["recall", "refund_flag"]).stdout).toContain("[team caveat] Refunds");
+  });
+});
+
+describe("shared folder review regressions", () => {
+  function setup() {
+    const e = env();
+    const share = join(e.ROOT!, "share");
+    mkdirSync(share, { recursive: true });
+    const base = { ...e, ENGRAM_TEAM_DIR: "" };
+    const hook = (opt: string) =>
+      spawnSync("node", [CLI, "hook", "refresh"], {
+        env: { ...base, CLAUDE_PLUGIN_ROOT: "/plugin", CLAUDE_PLUGIN_OPTION_TEAM_DIR: opt },
+        cwd: e.ROOT,
+        input: "{}",
+        encoding: "utf-8",
+      });
+    const at = (args: string[], cwd = e.ROOT!) =>
+      spawnSync("node", [CLI, ...args], { env: base, cwd, encoding: "utf-8" });
+    return { e, share, hook, at };
+  }
+
+  it("clearing the plugin option turns team sharing off", () => {
+    const { share, hook, at } = setup();
+    hook(share);
+    expect(at(["status"]).stdout).toContain(`team folder: ${share}`);
+    hook("");
+    expect(at(["status"]).stdout).toContain("team folder: none");
+  });
+
+  it("selections belong to one team folder", () => {
+    const { e, share, hook, at } = setup();
+    hook(share);
+    at(["scope", "on"]);
+    const other = join(e.ROOT!, "other-team");
+    mkdirSync(other);
+    hook(other);
+    expect(at(["scope"]).stdout).toContain("out of team scope");
+  });
+
+  it("parallel scope changes are not lost", async () => {
+    const { e, share, hook } = setup();
+    hook(share);
+    const dirs = Array.from({ length: 12 }, (_, i) => {
+      const d = join(e.ROOT!, `r${i}`);
+      mkdirSync(join(d, ".git"), { recursive: true });
+      return d;
+    });
+    await Promise.all(
+      dirs.map(
+        (d) =>
+          new Promise<void>((done) =>
+            spawn("node", [CLI, "scope", "on"], { env: { ...e, ENGRAM_TEAM_DIR: "" }, cwd: d }).on(
+              "close",
+              () => done(),
+            ),
+          ),
+      ),
+    );
+    const cfg = JSON.parse(readFileSync(join(e.ENGRAM_HOME!, "config.json"), "utf-8"));
+    expect(cfg.projects.length).toBe(12);
+  }, 30_000);
+
+  it("does not silently replace a teammate's edit", () => {
+    const { share, hook, at } = setup();
+    hook(share);
+    at(["scope", "on"]);
+    const id = at([
+      "save",
+      "--kind",
+      "caveat",
+      "--title",
+      "Refunds",
+      "--body",
+      "Exclude refund_flag",
+    ]).stdout.match(/caveat (\S+):/)![1];
+    at(["share", id, "--yes"]);
+    const file = join(share, "caveats", "refunds.md");
+    writeFileSync(file, `${readFileSync(file, "utf-8")}\nTeammate: also exclude test orders.\n`);
+    expect(at(["share", id]).stdout).toContain("REPLACE");
+    const r = at(["share", id, "--yes"]);
+    expect(r.status).toBe(1);
+    expect(readFileSync(file, "utf-8")).toContain("Teammate");
+    expect(at(["share", id, "--yes", "--update"]).status).toBe(0);
+  });
+
+  it("without a team folder, notes only go to their own project's .engram/", () => {
+    const { e, at } = setup();
+    const x = join(e.ROOT!, "x");
+    const y = join(e.ROOT!, "y");
+    mkdirSync(join(x, ".git"), { recursive: true });
+    mkdirSync(join(y, ".engram"), { recursive: true });
+    mkdirSync(join(y, ".git"));
+    const id = at(
+      ["save", "--kind", "caveat", "--title", "X private", "--body", "b"],
+      x,
+    ).stdout.match(/caveat (\S+):/)![1];
+    const r = at(["share", id, "--yes"], y);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("share it from that project");
   });
 });

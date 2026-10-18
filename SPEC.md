@@ -86,19 +86,24 @@ present in the corpus)`. It leaves out the current session and past prompts, and
 ## Team store
 
 - Folders: the project's nearest `.engram/` (up to the git root) and the shared folder, in that
-  priority. The shared folder is `ENGRAM_TEAM_DIR`, else the plugin option `team_dir`
-  (`CLAUDE_PLUGIN_OPTION_TEAM_DIR`, persisted to `<data dir>/config.json` by hooks so CLI commands see
-  it), else `config.json`'s `teamDir`, else `~/.claude/engram-team` if it exists.
+  priority. The shared folder is `ENGRAM_TEAM_DIR`, else, inside plugin hooks
+  (`CLAUDE_PLUGIN_ROOT` set), the plugin option `team_dir` (`CLAUDE_PLUGIN_OPTION_TEAM_DIR`; empty means
+  none), else `config.json`'s `teamDir`, else `~/.claude/engram-team` if it exists. Hooks persist the
+  option to `config.json` (and remove it when cleared) so CLI commands run through the Bash tool, which
+  lacks the variable, see the same folder. `config.json` is updated under a lock file.
 - Snapshot: `<data dir>/team-snapshot.json` holds the shared folder's `scope.json` and parsed items.
   Sync hooks (`SessionStart`, `UserPromptSubmit`) read only the snapshot and the local `.engram/`, so a
   slow or offline network drive never delays a prompt. Async `SessionStart` and `Stop` refresh it when
   older than 10 minutes, guarded by a lock file (2 minutes) and written with tmp + rename. `status`,
-  `scope` and `share` refresh it unconditionally and report an unreachable folder.
+  `scope` and `share` refresh it unconditionally and report an unreachable folder. Because sync hooks
+  trust the snapshot, a `scope.json` change reaches prompts after the next refresh (up to 10 minutes,
+  or longer while the folder is offline).
 - Scope, checked in this order:
   1. the project has a `.engram/` folder: in scope;
   2. no shared folder is configured: in scope (there is nothing to share with);
-  3. the user selected the project (`scope on` stores `{root, remote}` in `config.json`; a clone with
-     the same remote also counts): in scope;
+  3. the user selected the project for the current shared folder (`scope on` stores
+     `{root, remote, team}` in `config.json`; a clone with the same remote also counts; switching
+     folders does not carry selections over): in scope;
   4. the snapshot's `scope.json` lists the normalized origin remote (`projects`) or the project root
      (`paths`; `*` globs, `~` expanded): in scope;
   5. otherwise: out of scope.
@@ -114,7 +119,9 @@ present in the corpus)`. It leaves out the current session and past prompts, and
   are hidden.
 - `share` without an id lists in-scope notes not yet in the team store. `share <id>` prints a preview.
   `share <id> --yes` writes JSON-quoted frontmatter to the shared folder (else the project `.engram/`,
-  or `--to DIR`), never overwriting another item, and refreshes the snapshot.
+  which only accepts that project's own notes, or `--to DIR`) and refreshes the snapshot. It reuses the
+  file that already holds the id, refuses to replace one whose content differs unless `--update` is
+  given, and never overwrites another item (new files get a suffix on name clashes).
 
 ## History
 

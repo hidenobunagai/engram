@@ -28,9 +28,10 @@ import {
 import { search } from "./search";
 import {
   loadTeam,
+  planTeamWrite,
+  samePath,
   projectStore,
   refreshSnapshot,
-  serialize,
   setSelected,
   sharedStore,
   teamDirs,
@@ -137,7 +138,12 @@ function save(opt: Record<string, string>): string {
 const shareable = (n: Note) => !!n.root && teamScope(n.root).inScope;
 
 /** Without an id: the newest shareable notes that are not in the team store yet. */
-function share(id: string | undefined, opt: Record<string, string>, yes: boolean): string {
+function share(
+  id: string | undefined,
+  opt: Record<string, string>,
+  yes: boolean,
+  update = false,
+): string {
   const { error } = refreshSnapshot(0);
   if (error) throw new Error(error);
   if (!id) {
@@ -162,12 +168,16 @@ function share(id: string | undefined, opt: Record<string, string>, yes: boolean
         "Run /engram:scope on in that project (or list it in the team's scope.json), then share it from there.",
     );
   }
-  const base = opt.to || sharedStore() || projectStore(process.cwd());
+  const local = projectStore(process.cwd());
+  const base = opt.to || sharedStore() || local;
   if (!base) {
     throw new Error(
       "No team folder configured. Set it with: claude plugin configure engram (team_dir), or pass --to DIR.",
     );
   }
+  // A project's .engram/ only takes that project's own notes; it is usually committed with the repo.
+  if (base === local && !opt.to && !samePath(note.root || "", projectRoot(process.cwd())))
+    throw new Error(`${id} comes from ${note.root}; share it from that project, or pass --to DIR.`);
   const item = {
     id: note.id,
     kind: note.kind,
@@ -178,9 +188,22 @@ function share(id: string | undefined, opt: Record<string, string>, yes: boolean
     created_at: new Date(note.ts).toISOString().slice(0, 10),
     body: note.body,
   };
+  const plan = planTeamWrite(base, item);
+  const changed = plan.existing !== undefined && plan.existing !== plan.text;
   // Writing to a shared folder publishes at once, so the default is a preview.
-  if (!yes)
-    return `Preview (nothing written yet) — would write to ${base}:\n\n${serialize(item)}\nRun again with --yes to publish it to the team.`;
+  if (!yes) {
+    const action =
+      plan.existing === undefined
+        ? `write ${plan.path}`
+        : changed
+          ? `REPLACE ${plan.path} (it differs from this note; a teammate may have edited it)`
+          : `leave ${plan.path} unchanged`;
+    return `Preview (nothing written yet) — would ${action}:\n\n${plan.text}\nRun again with --yes to publish it to the team${changed ? " (add --update to replace the existing file)" : ""}.`;
+  }
+  if (changed && !update)
+    throw new Error(
+      `${plan.path} already exists with different content. Check it, then run again with --yes --update to replace it.`,
+    );
   const path = writeTeamItem(base, item);
   refreshSnapshot(0);
   return `Wrote ${path}\nTeammates see it in their next session (a git-backed folder also needs a commit and push).`;
@@ -231,9 +254,10 @@ function scope(action?: string): string {
   const cwd = process.cwd();
   if (action === "on" || action === "off") setSelected(cwd, action === "on");
   else if (action) throw new Error("Usage: engram scope [on|off]");
-  refreshSnapshot(0);
+  const { error } = refreshSnapshot(0);
   const s = teamScope(cwd);
-  return `${projectRoot(cwd)}: ${s.inScope ? "in" : "out of"} team scope (${s.reason})`;
+  const note = error ? `\nWarning: ${error}; using the last snapshot.` : "";
+  return `${projectRoot(cwd)}: ${s.inScope ? "in" : "out of"} team scope (${s.reason})${note}`;
 }
 
 function status(): string {
@@ -281,9 +305,10 @@ function main(): void {
       out = forget(pos[0] || "") ? `Forgot ${pos[0]}` : `No saved note with id "${pos[0]}"`;
     else if (cmd === "share")
       out = share(
-        pos.find((p) => p !== "--yes"),
+        pos.find((p) => !p.startsWith("--")),
         opt,
         pos.includes("--yes"),
+        pos.includes("--update"),
       );
     else if (cmd === "scope") out = scope(pos[0]);
     else if (cmd === "history") out = history(pos, opt);
