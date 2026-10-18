@@ -33,7 +33,7 @@ Or from your terminal:
 
 ```bash
 claude plugin marketplace add hidenobunagai/engram
-claude plugin install engram
+claude plugin install engram@engram-marketplace
 ```
 
 ### Development Setup
