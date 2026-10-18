@@ -44,6 +44,8 @@ export interface Note {
   body: string;
   tables?: string[];
   tags?: string[];
+  /** Project root at save time; `share` re-checks the team scope against it. */
+  root?: string;
 }
 
 interface Tombstone {
@@ -75,6 +77,17 @@ export function clipMiddle(text: string, max: number): string {
   if (text.length <= max) return text;
   const head = Math.floor(max * 0.4);
   return `${text.slice(0, head)}\n…\n${text.slice(text.length - (max - head))}`;
+}
+
+const pad = (n: number) => String(n).padStart(2, "0");
+/** Local-time "YYYY-MM-DD" and "YYYY-MM-DD HH:MM", so dates match what the analyst sees on their clock. */
+export function localDay(ts: number): string {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+export function localTime(ts: number): string {
+  const d = new Date(ts);
+  return `${localDay(ts)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 export function newId(prefix: string): string {
@@ -184,19 +197,28 @@ export function projectObservations(
     .flatMap((f) => readLines<Observation>(join(dir, f), skip));
 }
 
+/** Saving the same note (project, kind, title, body) again refreshes it instead of duplicating it. */
 export function saveNote(n: Omit<Note, "t" | "id" | "ts"> & { id?: string }): Note {
+  const title = clip(sanitize(n.title).replace(/\s+/g, " ").trim(), 200);
+  const body = clip(sanitize(n.body), MAX_BODY);
+  const same = n.id
+    ? undefined
+    : allNotes().find(
+        (x) => x.project === n.project && x.kind === n.kind && x.title === title && x.body === body,
+      );
   const note: Note = {
     t: "note",
-    id: n.id || newId(n.kind),
+    id: n.id || same?.id || newId(n.kind),
     ts: Date.now(),
     project: n.project,
     kind: n.kind,
-    title: clip(sanitize(n.title).replace(/\s+/g, " ").trim(), 200),
-    body: clip(sanitize(n.body), MAX_BODY),
+    title,
+    body,
   };
   if (n.session) note.session = n.session;
   if (n.tables?.length) note.tables = n.tables.map((t) => sanitize(t));
   if (n.tags?.length) note.tags = n.tags.map((t) => sanitize(t));
+  if (n.root) note.root = n.root;
   appendLine(notesFile(), note);
   return note;
 }
@@ -223,6 +245,42 @@ export function allNotes(): Note[] {
     else if (r.t === "note") byId.set(r.id, r);
   }
   return [...byId.values()];
+}
+
+export interface SessionSummary {
+  project: string;
+  session: string;
+  start: number;
+  end: number;
+  records: number;
+  errors: number;
+  firstPrompt?: string;
+}
+
+/** One summary per session file, newest first. Without `project`, every project is listed. */
+export function listSessions(project?: string): SessionSummary[] {
+  const root = join(dataDir(), "obs");
+  if (!existsSync(root)) return [];
+  const out: SessionSummary[] = [];
+  for (const p of project ? [project] : readdirSync(root)) {
+    const dir = join(root, p);
+    if (!existsSync(dir) || !statSync(dir).isDirectory()) continue;
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith(".jsonl")) continue;
+      const recs = readLines<Observation>(join(dir, f));
+      if (!recs.length) continue;
+      out.push({
+        project: p,
+        session: recs[0].session,
+        start: recs[0].ts,
+        end: recs[recs.length - 1].ts,
+        records: recs.length,
+        errors: recs.filter((r) => r.error).length,
+        firstPrompt: recs.find((r) => r.tool === "prompt")?.input,
+      });
+    }
+  }
+  return out.sort((a, b) => b.end - a.end);
 }
 
 export function readRecap(project: string): Recap | null {

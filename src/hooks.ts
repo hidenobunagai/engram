@@ -3,8 +3,10 @@ import {
   type Observation,
   allNotes,
   clip,
+  localDay as day,
   projectId,
   projectObservations,
+  projectRoot,
   pruneObservations,
   readRecap,
   saveNote,
@@ -40,7 +42,6 @@ const TRIVIAL = new Set(
   ),
 );
 
-const day = (ts: number) => new Date(ts).toISOString().slice(0, 10);
 const oneLine = (s: string, max: number) => clip(s.replace(/\s+/g, " ").trim(), max);
 
 export function extractTables(sql: string): string[] {
@@ -54,13 +55,66 @@ export function extractTables(sql: string): string[] {
   return [...out];
 }
 
+const FILE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+/** Files whose written text is analysis code worth remembering; other files are recorded by path only. */
+const CODE_FILE = /\.(sql|py|r|ipynb|ya?ml|sh|jinja2?|j2|md|js|ts)$/i;
+
+const SQL_WORD = /\b(select|insert|update|delete|merge|create|alter|drop|grant|with|copy|from)\b/i;
+
+/** Rows of delimited data (an export saved under a code extension) rather than code. */
+export function looksLikeData(text: string): boolean {
+  const lines = text.split("\n").filter((l) => l.trim());
+  if (lines.length < 3) return false;
+  const delimited = lines.filter((l) => (l.match(/[,\t|;]/g) || []).length >= 3).length;
+  return delimited / lines.length >= 0.8 && !SQL_WORD.test(lines.slice(0, 3).join(" "));
+}
+
+/** Code cells only: a written notebook's outputs can hold result tables and images. */
+function notebookSource(content: string): string {
+  try {
+    const nb = JSON.parse(content) as {
+      cells?: Array<{ cell_type?: string; source?: string | string[] }>;
+    };
+    return (nb.cells || [])
+      .filter((c) => c.cell_type !== "raw")
+      .map((c) => (Array.isArray(c.source) ? c.source.join("") : c.source || ""))
+      .join("\n");
+  } catch {
+    return "";
+  }
+}
+
 /**
- * Bash: the command. MCP: only SQL-like string fields (sql, query, statement, command), never the
+ * "edit <path>" plus the new text for code files (Write content, Edit new_string, notebook source).
+ * Data-looking text and SQL files without SQL are recorded by path only.
+ */
+function fileText(tool: string, ti: Record<string, unknown>): string | null {
+  const path = typeof ti.file_path === "string" ? ti.file_path : ti.notebook_path;
+  if (typeof path !== "string") return null;
+  const head = `${tool.toLowerCase()} ${path}`;
+  if (!CODE_FILE.test(path)) return head;
+  const edits = Array.isArray(ti.edits)
+    ? ti.edits.map((e) => (e as { new_string?: unknown }).new_string)
+    : [];
+  const content =
+    typeof ti.content === "string" && /\.ipynb$/i.test(path)
+      ? notebookSource(ti.content)
+      : ti.content;
+  const text = [content, ti.new_string, ti.new_source, ...edits]
+    .filter((v) => typeof v === "string")
+    .join("\n");
+  if (!text || looksLikeData(text) || (/\.sql$/i.test(path) && !SQL_WORD.test(text))) return head;
+  return `${head}\n${text}`;
+}
+
+/**
+ * Write/Edit: see fileText. Bash: the command. MCP: only SQL-like string fields (sql, query, statement, command), never the
  * rest of the input, which can hold email bodies, sheet rows or document text. Other calls: nothing.
  */
 export function toolText(input: HookInput): string | null {
   const ti = input.tool_input || {};
   if (input.tool_name === "Bash") return typeof ti.command === "string" ? ti.command : null;
+  if (FILE_TOOLS.has(input.tool_name || "")) return fileText(input.tool_name!, ti);
   const fields: string[] = [];
   const visit = (obj: Record<string, unknown>, depth: number) => {
     for (const [k, v] of Object.entries(obj)) {
@@ -115,8 +169,14 @@ export function errorHeadline(error: string): string {
  * An error followed by a similar successful call becomes a durable "fix" note.
  * An error that some earlier success already resolved is never paired again.
  */
-export function detectFix(history: Observation[], success: Observation): Note | null {
-  const isRun = (o: Observation) => o.id !== success.id && o.tool !== "prompt";
+export function detectFix(
+  history: Observation[],
+  success: Observation,
+  root?: string,
+): Note | null {
+  if (FILE_TOOLS.has(success.tool)) return null;
+  const isRun = (o: Observation) =>
+    o.id !== success.id && o.tool !== "prompt" && !FILE_TOOLS.has(o.tool);
   for (let i = history.length - 1; i >= 0 && i >= history.length - 15; i--) {
     const prev = history[i];
     if (!isRun(prev) || !similar(prev, success)) continue;
@@ -130,6 +190,7 @@ export function detectFix(history: Observation[], success: Observation): Note | 
       title: `Fix: ${oneLine(errLine, 120)}`,
       body: `Failed:\n\`\`\`\n${prev.input}\n\`\`\`\nError:\n\`\`\`\n${prev.error}\n\`\`\`\nWorked:\n\`\`\`\n${success.input}\n\`\`\``,
       tables: [...new Set([...extractTables(prev.input), ...extractTables(success.input)])],
+      root,
     });
   }
   return null;
@@ -147,7 +208,8 @@ export function onToolUse(input: HookInput): void {
     input: text,
     error: input.hook_event_name === "PostToolUseFailure" ? input.error || "failed" : undefined,
   });
-  if (!obs.error) detectFix(sessionObservations(project, input.session_id), obs);
+  if (!obs.error)
+    detectFix(sessionObservations(project, input.session_id), obs, projectRoot(input.cwd));
 }
 
 export function onStop(input: HookInput): void {
@@ -200,7 +262,14 @@ export function buildDocs(
     docs.push({
       id: o.id,
       source: "obs",
-      kind: o.tool === "prompt" ? "prompt" : o.error ? "error" : "run",
+      kind:
+        o.tool === "prompt"
+          ? "prompt"
+          : o.error
+            ? "error"
+            : FILE_TOOLS.has(o.tool)
+              ? "file"
+              : "run",
       title: o.tool,
       text: `${o.input} ${o.error || ""}`,
       ts: o.ts,
@@ -208,6 +277,10 @@ export function buildDocs(
       display: o.error
         ? `error: ${oneLine(o.error, 160)} — from: ${oneLine(o.input, 120)}`
         : oneLine(o.input, 200),
+      // Every edit of one file is one memory: recall shows its best-matching version only.
+      group: FILE_TOOLS.has(o.tool)
+        ? `file:${o.input.split("\n")[0].replace(/^\S+\s+/, "")}`
+        : undefined,
     });
   }
   return docs;
@@ -233,7 +306,7 @@ export function uniqueLines(hits: Hit[], max: number): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const h of hits) {
-    const key = h.doc.display ?? h.doc.text;
+    const key = h.doc.group ?? h.doc.display ?? h.doc.text;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(formatHit(h));
@@ -337,10 +410,17 @@ export function onSessionStart(input: HookInput): string {
   const index = teamIndex(items, skipped.length, SESSION_BUDGET - parts.join("\n").length - 300);
   if (index) parts.push(index);
 
-  const notes = allNotes().length;
+  const notes = allNotes();
+  const recent = notes
+    .filter((n) => n.project === project)
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, 5)
+    .map((n) => `- [${n.kind} ${n.id}] ${oneLine(n.title, 140)}`);
+  if (recent.length)
+    parts.push(["engram: latest notes saved in this project:", ...recent].join("\n"));
   parts.push(
-    `engram: personal memory holds ${notes} saved note(s); matching ones are added to prompts automatically. ` +
-      "Durable findings (data caveats, metric definitions, fixes) can be saved with /engram:save.",
+    `engram: personal memory holds ${notes.length} saved note(s); matching ones are added to prompts automatically. ` +
+      "Durable findings (data caveats, metric definitions, fixes) can be saved with /engram:save; past sessions are listed by /engram:history.",
   );
   return parts.join("\n\n");
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { spawn, spawnSync } from "child_process";
-import { mkdtempSync, readFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -117,5 +117,103 @@ describe("cli arguments", () => {
       "-- top 10\nselect 1 from dim_users",
     ]);
     expect(run(e, ["recall", "Top users"]).stdout).toContain("-- top 10");
+  });
+});
+
+describe("history and scoped share", () => {
+  it("lists sessions and shows a day's timeline", () => {
+    const e = env();
+    run(e, ["hook", "prompt"], fixture("user-prompt-submit"));
+    run(e, ["hook", "tool"], fixture("post-tool-use-write"));
+    const list = run(e, ["history"]).stdout;
+    expect(list).toContain("11111111");
+    expect(list).toContain("2 records");
+    // bun test runs in UTC; take the day from the CLI's own (local-time) listing instead.
+    const today = list.match(/\d{4}-\d{2}-\d{2}/)![0];
+    expect(run(e, ["history", today]).stdout).toContain("Write: write /work/analytics/q.sql");
+  });
+
+  it("refuses to share notes saved outside the scope", () => {
+    const e = env();
+    mkdirSync(e.ENGRAM_TEAM_DIR!, { recursive: true });
+    writeFileSync(
+      join(e.ENGRAM_TEAM_DIR!, "scope.json"),
+      '{"projects":["github.com/acme-analytics/*"]}',
+    );
+    const saved = run(e, ["save", "--kind", "fact", "--title", "zsh alias", "--body", "alias ll"]);
+    expect(saved.stdout).toContain("personal only");
+    const id = saved.stdout.match(/fact (\S+):/)![1];
+    expect(run(e, ["share"]).stdout).toContain("No shareable notes");
+    const r = run(e, ["share", id]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("outside the team scope");
+  });
+});
+
+describe("share re-checks scope", () => {
+  it("does not share notes saved before scope.json existed, or reused from another project", () => {
+    const e = env();
+    const dot = join(e.ROOT!, "dotfiles");
+    const kpi = join(e.ROOT!, "kpi");
+    for (const [d, url] of [
+      [dot, "git@github.com:me/dotfiles.git"],
+      [kpi, "git@github.com:acme-analytics/kpi.git"],
+    ]) {
+      mkdirSync(join(d, ".git"), { recursive: true });
+      writeFileSync(join(d, ".git", "config"), `[remote "origin"]\n\turl = ${url}\n`);
+    }
+    const at = (cwd: string, args: string[]) =>
+      spawnSync("node", [CLI, ...args], { env: e, cwd, encoding: "utf-8" });
+    mkdirSync(e.ENGRAM_TEAM_DIR!, { recursive: true });
+    const early = at(dot, [
+      "save",
+      "--kind",
+      "fact",
+      "--title",
+      "Personal shortcut",
+      "--body",
+      "x",
+    ]).stdout.match(/fact (\S+):/)![1];
+    writeFileSync(
+      join(e.ENGRAM_TEAM_DIR!, "scope.json"),
+      '{"projects":["github.com/acme-analytics/*"]}',
+    );
+    const metric = at(kpi, [
+      "save",
+      "--kind",
+      "metric",
+      "--title",
+      "Active users",
+      "--body",
+      "DAU",
+    ]).stdout.match(/metric (\S+):/)![1];
+    const again = at(dot, ["save", "--kind", "metric", "--title", "Active users", "--body", "DAU"]);
+    expect(again.stdout).toContain("personal only");
+    expect(again.stdout).not.toContain(metric);
+    const list = at(dot, ["share"]).stdout;
+    expect(list).toContain(metric);
+    expect(list).not.toContain(early);
+    expect(at(dot, ["share", early]).status).toBe(1);
+  });
+});
+
+describe("scope paths", () => {
+  // bun caches os.homedir(), so ~ expansion is checked under real Node with HOME set.
+  it("expands Windows-style ~ patterns", () => {
+    const e = env();
+    const home = join(e.ROOT!, "home");
+    const proj = join(home, "work", "acme", "kpi");
+    mkdirSync(proj, { recursive: true });
+    mkdirSync(e.ENGRAM_TEAM_DIR!, { recursive: true });
+    writeFileSync(
+      join(e.ENGRAM_TEAM_DIR!, "scope.json"),
+      JSON.stringify({ paths: ["~\\work\\acme\\*"] }),
+    );
+    const r = spawnSync("node", [CLI, "status"], {
+      env: { ...e, HOME: home, USERPROFILE: home },
+      cwd: proj,
+      encoding: "utf-8",
+    });
+    expect(r.stdout).toContain("team scope: in scope");
   });
 });

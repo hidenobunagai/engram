@@ -225,3 +225,120 @@ describe("review regressions", () => {
     );
   });
 });
+
+describe("file edits, history and dedupe", () => {
+  it("captures SQL written to files but only the path for data files", () => {
+    const { work } = sandbox();
+    const fx = (name: string) =>
+      JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", `${name}.json`), "utf-8"));
+    onToolUse({ ...fx("post-tool-use-write"), cwd: work });
+    onToolUse({ ...fx("post-tool-use-edit"), cwd: work });
+    onToolUse(
+      ev(work, "s1", {
+        hook_event_name: "PostToolUse",
+        tool_name: "Write",
+        tool_input: { file_path: join(work, "out.csv"), content: "name,email\nTaro,t@x.jp" },
+      }),
+    );
+    expect(
+      projectObservations(projectId(work))
+        .map((o) => o.input)
+        .sort(),
+    ).toEqual([
+      "edit /work/analytics/q.sql\nselect user_id from dim_users",
+      `write ${join(work, "out.csv")}`,
+      "write /work/analytics/q.sql\nselect 1 from dim_users\n",
+    ]);
+  });
+
+  it("does not pair failed edits as fixes", () => {
+    const { work } = sandbox();
+    const edit = (error?: string) =>
+      onToolUse(
+        ev(work, "s1", {
+          hook_event_name: error ? "PostToolUseFailure" : "PostToolUse",
+          tool_name: "Edit",
+          tool_input: { file_path: "/w/q.sql", old_string: "a", new_string: "b" },
+          error,
+        }),
+      );
+    edit("String to replace not found");
+    edit();
+    expect(allNotes().length).toBe(0);
+  });
+
+  it("refreshes instead of duplicating an identical note", () => {
+    sandbox();
+    const a = saveNote({ project: "p", kind: "caveat", title: "T", body: "B" });
+    const b = saveNote({ project: "p", kind: "caveat", title: "T", body: "B" });
+    expect(b.id).toBe(a.id);
+    expect(allNotes().length).toBe(1);
+  });
+
+  it("lists this project's latest notes at session start", () => {
+    const { work } = sandbox();
+    saveNote({
+      project: projectId(work),
+      kind: "caveat",
+      title: "Soft deletes in dim_users",
+      body: "b",
+    });
+    expect(onSessionStart(ev(work, "s1", { source: "startup" }))).toContain(
+      "] Soft deletes in dim_users",
+    );
+  });
+});
+
+describe("file capture review regressions", () => {
+  const write = (work: string, file: string, content: string) =>
+    onToolUse(
+      ev(work, "s1", {
+        hook_event_name: "PostToolUse",
+        tool_name: "Write",
+        tool_input: { file_path: file, content },
+      }),
+    );
+
+  it("stores notebook code, not outputs, and skips data saved as .sql", () => {
+    const { work } = sandbox();
+    const nb = {
+      cells: [
+        {
+          cell_type: "code",
+          outputs: [{ data: { "image/png": "iVBOR".repeat(400) } }],
+          source: ["df = spark.sql('SELECT * FROM fct_orders WHERE refund_flag = 1')"],
+        },
+      ],
+    };
+    write(work, "/w/a.ipynb", JSON.stringify(nb));
+    write(
+      work,
+      "/w/export.sql",
+      "id,name,city,score\n1,Taro Yamada,Tokyo,3\n2,Hanako Sato,Osaka,4\n",
+    );
+    expect(projectObservations(projectId(work)).map((o) => o.input)).toEqual([
+      "write /w/a.ipynb\ndf = spark.sql('SELECT * FROM fct_orders WHERE refund_flag = 1')",
+      "write /w/export.sql",
+    ]);
+  });
+
+  it("shows one line per file however often it was edited", () => {
+    const { work } = sandbox();
+    for (let i = 0; i < 10; i++)
+      onToolUse(
+        ev(work, "s1", {
+          hook_event_name: "PostToolUse",
+          tool_name: "Edit",
+          tool_input: {
+            file_path: "/w/report.sql",
+            old_string: "a",
+            new_string: `SELECT revenue_${i} FROM fct_orders WHERE status = 'paid'`,
+          },
+        }),
+      );
+    write(work, "/w/other.sql", "SELECT refund FROM fct_orders WHERE status = 'paid'");
+    const ctx = onPrompt(ev(work, "s2", { prompt: "revenue from fct_orders paid status" }));
+    expect(ctx.match(/report\.sql/g)?.length).toBe(1);
+    expect(ctx).toContain("other.sql");
+  });
+});
