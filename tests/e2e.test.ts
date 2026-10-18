@@ -149,3 +149,71 @@ describe("history and scoped share", () => {
     expect(r.stderr).toContain("outside the team scope");
   });
 });
+
+describe("share re-checks scope", () => {
+  it("does not share notes saved before scope.json existed, or reused from another project", () => {
+    const e = env();
+    const dot = join(e.ROOT!, "dotfiles");
+    const kpi = join(e.ROOT!, "kpi");
+    for (const [d, url] of [
+      [dot, "git@github.com:me/dotfiles.git"],
+      [kpi, "git@github.com:acme-analytics/kpi.git"],
+    ]) {
+      mkdirSync(join(d, ".git"), { recursive: true });
+      writeFileSync(join(d, ".git", "config"), `[remote "origin"]\n\turl = ${url}\n`);
+    }
+    const at = (cwd: string, args: string[]) =>
+      spawnSync("node", [CLI, ...args], { env: e, cwd, encoding: "utf-8" });
+    mkdirSync(e.ENGRAM_TEAM_DIR!, { recursive: true });
+    const early = at(dot, [
+      "save",
+      "--kind",
+      "fact",
+      "--title",
+      "Personal shortcut",
+      "--body",
+      "x",
+    ]).stdout.match(/fact (\S+):/)![1];
+    writeFileSync(
+      join(e.ENGRAM_TEAM_DIR!, "scope.json"),
+      '{"projects":["github.com/acme-analytics/*"]}',
+    );
+    const metric = at(kpi, [
+      "save",
+      "--kind",
+      "metric",
+      "--title",
+      "Active users",
+      "--body",
+      "DAU",
+    ]).stdout.match(/metric (\S+):/)![1];
+    const again = at(dot, ["save", "--kind", "metric", "--title", "Active users", "--body", "DAU"]);
+    expect(again.stdout).toContain("personal only");
+    expect(again.stdout).not.toContain(metric);
+    const list = at(dot, ["share"]).stdout;
+    expect(list).toContain(metric);
+    expect(list).not.toContain(early);
+    expect(at(dot, ["share", early]).status).toBe(1);
+  });
+});
+
+describe("scope paths", () => {
+  // bun caches os.homedir(), so ~ expansion is checked under real Node with HOME set.
+  it("expands Windows-style ~ patterns", () => {
+    const e = env();
+    const home = join(e.ROOT!, "home");
+    const proj = join(home, "work", "acme", "kpi");
+    mkdirSync(proj, { recursive: true });
+    mkdirSync(e.ENGRAM_TEAM_DIR!, { recursive: true });
+    writeFileSync(
+      join(e.ENGRAM_TEAM_DIR!, "scope.json"),
+      JSON.stringify({ paths: ["~\\work\\acme\\*"] }),
+    );
+    const r = spawnSync("node", [CLI, "status"], {
+      env: { ...e, HOME: home, USERPROFILE: home },
+      cwd: proj,
+      encoding: "utf-8",
+    });
+    expect(r.stdout).toContain("team scope: in scope");
+  });
+});

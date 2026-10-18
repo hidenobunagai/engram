@@ -83,3 +83,20 @@ describe("team scope", () => {
     expect(teamScope(wt).inScope).toBe(true);
   });
 });
+
+describe("scope review regressions", () => {
+  it("rejects scope.json of the wrong shape without throwing", () => {
+    const { work } = sandbox();
+    const r = repo(work, "kpi", "git@github.com:acme-analytics/kpi.git");
+    for (const bad of ["null", '{"projects":"github.com/*"}', '{"projects":[null]}', "[]"]) {
+      team();
+      writeFileSync(join(process.env.ENGRAM_TEAM_DIR!, "scope.json"), bad);
+      expect(teamScope(r)).toMatchObject({ inScope: false });
+      expect(onSessionStart(ev(r, { source: "startup" }))).toContain("personal memory");
+    }
+  });
+
+  it("normalizes .git/ remotes", () => {
+    expect(normalizeRemote("https://github.com/acme/kpi.git/")).toBe("github.com/acme/kpi");
+  });
+});

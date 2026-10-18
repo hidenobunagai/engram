@@ -44,8 +44,8 @@ export interface Note {
   body: string;
   tables?: string[];
   tags?: string[];
-  /** Saved inside the team scope, so `share` may publish it. */
-  team?: boolean;
+  /** Project root at save time; `share` re-checks the team scope against it. */
+  root?: string;
 }
 
 interface Tombstone {
@@ -197,13 +197,15 @@ export function projectObservations(
     .flatMap((f) => readLines<Observation>(join(dir, f), skip));
 }
 
-/** Saving the same kind, title and body again refreshes the existing note instead of duplicating it. */
+/** Saving the same note (project, kind, title, body) again refreshes it instead of duplicating it. */
 export function saveNote(n: Omit<Note, "t" | "id" | "ts"> & { id?: string }): Note {
   const title = clip(sanitize(n.title).replace(/\s+/g, " ").trim(), 200);
   const body = clip(sanitize(n.body), MAX_BODY);
   const same = n.id
     ? undefined
-    : allNotes().find((x) => x.kind === n.kind && x.title === title && x.body === body);
+    : allNotes().find(
+        (x) => x.project === n.project && x.kind === n.kind && x.title === title && x.body === body,
+      );
   const note: Note = {
     t: "note",
     id: n.id || same?.id || newId(n.kind),
@@ -216,7 +218,7 @@ export function saveNote(n: Omit<Note, "t" | "id" | "ts"> & { id?: string }): No
   if (n.session) note.session = n.session;
   if (n.tables?.length) note.tables = n.tables.map((t) => sanitize(t));
   if (n.tags?.length) note.tags = n.tags.map((t) => sanitize(t));
-  if (n.team || same?.team) note.team = true;
+  if (n.root) note.root = n.root;
   appendLine(notesFile(), note);
   return note;
 }

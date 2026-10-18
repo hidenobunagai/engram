@@ -56,9 +56,10 @@ var RULES = [
     '$1"[REDACTED_SECRET]"$2'
   ],
   [
-    new RegExp(`(\\b(?:[A-Za-z0-9]+_)*(?:${KV_KEYS})(?:_(?:prod|dev|test|stg|staging|\\d+))?["']?\\s*[:=]\\s*)${NOT_LITERAL}(?:${VALUE})`, "gi"),
+    new RegExp(`(\\b(?:[A-Za-z0-9]+_)*(?:${KV_KEYS})(?:_(?:prod|dev|test|stg|staging|\\d+))?["']?\\]?\\s*[:=]\\s*)${NOT_LITERAL}(?:${VALUE})`, "gi"),
     "$1[REDACTED_SECRET]"
   ],
+  [/(\b(?:password|identified\s+by)\s+)(?:'[^']*'|"[^"]*")/gi, "$1[REDACTED_SECRET]"],
   [/(\b(?:mysql|mariadb|mysqldump|mysqladmin)\b[^\n|;&]*?\s-p)[^\s-]\S*/g, "$1[REDACTED_SECRET]"],
   [/(\s(?:-u|--user)\s+[^\s:]+:)\S+/g, "$1[REDACTED_SECRET]"],
   [/(Authorization:\s*(?:Token|Key|ApiKey))\s+\S+/gi, "$1 [REDACTED_TOKEN]"],
@@ -228,7 +229,7 @@ function projectObservations(project, opts = {}) {
 function saveNote(n) {
   const title = clip(sanitize(n.title).replace(/\s+/g, " ").trim(), 200);
   const body = clip(sanitize(n.body), MAX_BODY);
-  const same = n.id ? undefined : allNotes().find((x) => x.kind === n.kind && x.title === title && x.body === body);
+  const same = n.id ? undefined : allNotes().find((x) => x.project === n.project && x.kind === n.kind && x.title === title && x.body === body);
   const note = {
     t: "note",
     id: n.id || same?.id || newId(n.kind),
@@ -244,8 +245,8 @@ function saveNote(n) {
     note.tables = n.tables.map((t) => sanitize(t));
   if (n.tags?.length)
     note.tags = n.tags.map((t) => sanitize(t));
-  if (n.team || same?.team)
-    note.team = true;
+  if (n.root)
+    note.root = n.root;
   appendLine(notesFile(), note);
   return note;
 }
@@ -485,7 +486,7 @@ function gitRemote(root) {
   }
 }
 function normalizeRemote(url) {
-  return url.trim().replace(/^[a-z+]+:\/\//i, "").replace(/^[^@/]+@/, "").replace(/^([^/:]+):(?!\d+\/)/, "$1/").replace(/^([^/:]+):\d+\//, "$1/").replace(/\.git$/, "").replace(/\/+$/, "").toLowerCase();
+  return url.trim().replace(/^[a-z+]+:\/\//i, "").replace(/^[^@/]+@/, "").replace(/^([^/:]+):(?!\d+\/)/, "$1/").replace(/^([^/:]+):\d+\//, "$1/").replace(/\/+$/, "").replace(/\.git$/i, "").toLowerCase();
 }
 function globMatch(pattern, text) {
   const re = pattern.trim().toLowerCase().replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
@@ -499,19 +500,23 @@ function teamScope(cwd) {
     return { inScope: true, reason: "no scope.json in the team store (all projects)" };
   let cfg;
   try {
-    cfg = JSON.parse(readFileSync2(file, "utf-8"));
+    const raw = JSON.parse(readFileSync2(file, "utf-8"));
+    const strings = (v) => v === undefined || Array.isArray(v) && v.every((x) => typeof x === "string");
+    if (!raw || typeof raw !== "object" || Array.isArray(raw) || !strings(raw.projects) || !strings(raw.paths))
+      throw new Error('expected {"projects": [strings], "paths": [strings]}');
+    cfg = { projects: raw.projects || [], paths: raw.paths || [] };
   } catch (e) {
     return { inScope: false, reason: `scope.json is invalid: ${e.message}` };
   }
   const root = projectRoot(cwd);
   const remote = gitRemote(root);
   const norm = remote ? normalizeRemote(remote) : "";
-  const hitProject = norm ? (cfg.projects || []).find((p) => globMatch(normalizeRemote(p), norm)) : undefined;
+  const hitProject = norm ? cfg.projects.find((p) => globMatch(normalizeRemote(p), norm)) : undefined;
   if (hitProject)
     return { inScope: true, reason: `remote ${norm} matches "${hitProject}"` };
   const path = root.replace(/\\/g, "/");
   const home = homedir2().replace(/\\/g, "/");
-  const hitPath = (cfg.paths || []).find((p) => globMatch(p.replace(/^~(?=\/|$)/, home).replace(/\\/g, "/"), path));
+  const hitPath = cfg.paths.find((p) => globMatch(p.replace(/\\/g, "/").replace(/^~(?=\/|$)/, home), path));
   if (hitPath)
     return { inScope: true, reason: `path ${path} matches "${hitPath}"` };
   return {
@@ -689,6 +694,24 @@ function extractTables(sql) {
 }
 var FILE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 var CODE_FILE = /\.(sql|py|r|ipynb|ya?ml|sh|jinja2?|j2|md|js|ts)$/i;
+var SQL_WORD = /\b(select|insert|update|delete|merge|create|alter|drop|grant|with|copy|from)\b/i;
+function looksLikeData(text) {
+  const lines = text.split(`
+`).filter((l) => l.trim());
+  if (lines.length < 3)
+    return false;
+  const delimited = lines.filter((l) => (l.match(/[,\t|;]/g) || []).length >= 3).length;
+  return delimited / lines.length >= 0.8 && !SQL_WORD.test(lines.slice(0, 3).join(" "));
+}
+function notebookSource(content) {
+  try {
+    const nb = JSON.parse(content);
+    return (nb.cells || []).filter((c) => c.cell_type !== "raw").map((c) => Array.isArray(c.source) ? c.source.join("") : c.source || "").join(`
+`);
+  } catch {
+    return "";
+  }
+}
 function fileText(tool, ti) {
   const path = typeof ti.file_path === "string" ? ti.file_path : ti.notebook_path;
   if (typeof path !== "string")
@@ -697,10 +720,13 @@ function fileText(tool, ti) {
   if (!CODE_FILE.test(path))
     return head;
   const edits = Array.isArray(ti.edits) ? ti.edits.map((e) => e.new_string) : [];
-  const text = [ti.content, ti.new_string, ti.new_source, ...edits].filter((v) => typeof v === "string").join(`
+  const content = typeof ti.content === "string" && /\.ipynb$/i.test(path) ? notebookSource(ti.content) : ti.content;
+  const text = [content, ti.new_string, ti.new_source, ...edits].filter((v) => typeof v === "string").join(`
 `);
-  return text ? `${head}
-${text}` : head;
+  if (!text || looksLikeData(text) || /\.sql$/i.test(path) && !SQL_WORD.test(text))
+    return head;
+  return `${head}
+${text}`;
 }
 function toolText(input) {
   const ti = input.tool_input || {};
@@ -751,7 +777,7 @@ function errorHeadline(error) {
     return error.trim();
   return /traceback|^\s*at\s|stack trace/i.test(error) ? lines[lines.length - 1] : lines[0];
 }
-function detectFix(history, success, team = false) {
+function detectFix(history, success, root) {
   if (FILE_TOOLS.has(success.tool))
     return null;
   const isRun = (o) => o.id !== success.id && o.tool !== "prompt" && !FILE_TOOLS.has(o.tool);
@@ -782,7 +808,7 @@ Worked:
 ${success.input}
 \`\`\``,
       tables: [...new Set([...extractTables(prev.input), ...extractTables(success.input)])],
-      team
+      root
     });
   }
   return null;
@@ -802,7 +828,7 @@ function onToolUse(input) {
     error: input.hook_event_name === "PostToolUseFailure" ? input.error || "failed" : undefined
   });
   if (!obs.error)
-    detectFix(sessionObservations(project, input.session_id), obs, teamScope(input.cwd).inScope);
+    detectFix(sessionObservations(project, input.session_id), obs, projectRoot(input.cwd));
 }
 function onStop(input) {
   if (!input.last_assistant_message)
@@ -852,7 +878,9 @@ function buildDocs(cwd, opts = {}) {
       text: `${o.input} ${o.error || ""}`,
       ts: o.ts,
       weight: o.error ? 1 : o.tool === "prompt" ? 0.5 : 0.6,
-      display: o.error ? `error: ${oneLine(o.error, 160)} — from: ${oneLine(o.input, 120)}` : oneLine(o.input, 200)
+      display: o.error ? `error: ${oneLine(o.error, 160)} — from: ${oneLine(o.input, 120)}` : oneLine(o.input, 200),
+      group: FILE_TOOLS.has(o.tool) ? `file:${o.input.split(`
+`)[0].replace(/^\S+\s+/, "")}` : undefined
     });
   }
   return docs;
@@ -874,7 +902,7 @@ function uniqueLines(hits, max) {
   const seen = new Set;
   const out = [];
   for (const h of hits) {
-    const key = h.doc.display ?? h.doc.text;
+    const key = h.doc.group ?? h.doc.display ?? h.doc.text;
     if (seen.has(key))
       continue;
     seen.add(key);
@@ -1057,14 +1085,16 @@ function save(opt) {
     body: body.trim() || opt.title,
     tables: list(opt.tables),
     tags: list(opt.tags),
-    team: teamScope(process.cwd()).inScope
+    root: projectRoot(process.cwd())
   });
-  return `Saved ${note.kind} ${note.id}: ${note.title}${note.team ? "" : " (personal only: outside the team scope)"}`;
+  const personal = teamScope(process.cwd()).inScope ? "" : " (personal only: outside the team scope)";
+  return `Saved ${note.kind} ${note.id}: ${note.title}${personal}`;
 }
+var shareable = (n) => !!n.root && teamScope(n.root).inScope;
 function share(id, opt) {
   if (!id) {
     const shared = new Set(loadTeam(process.cwd()).items.map((t) => t.id));
-    const candidates = allNotes().filter((n) => n.team && !shared.has(n.id)).sort((a, b) => b.ts - a.ts).slice(0, 20);
+    const candidates = allNotes().filter((n) => !shared.has(n.id) && shareable(n)).sort((a, b) => b.ts - a.ts).slice(0, 20);
     if (!candidates.length)
       return "No shareable notes. Notes saved inside the team scope appear here.";
     return [
@@ -1077,8 +1107,8 @@ function share(id, opt) {
   const note = allNotes().find((n) => n.id === id);
   if (!note)
     throw new Error(`No saved note with id "${id}". Find ids with: engram recall <words>`);
-  if (!note.team) {
-    throw new Error(`${id} was saved outside the team scope, so it stays personal. ` + "Add the project to scope.json in the team repository (or add a .engram/ folder) and save it again there.");
+  if (!shareable(note)) {
+    throw new Error(`${id} comes from a project outside the team scope (${note.root || "unknown project"}), so it stays personal. ` + "Add that project to scope.json in the team repository, or give it a .engram/ folder.");
   }
   const base = opt.to || teamDirs(process.cwd())[0];
   if (!base) {
@@ -1102,7 +1132,8 @@ function history(pos, opt) {
   const target = pos.find((p) => p !== "--all");
   if (!target) {
     const all = pos.includes("--all");
-    const sessions = listSessions(all ? undefined : project).slice(0, Number(opt.limit) || 15);
+    const limit = Math.floor(Number(opt.limit));
+    const sessions = listSessions(all ? undefined : project).slice(0, limit > 0 ? limit : 15);
     if (!sessions.length)
       return "No recorded sessions.";
     return [
@@ -1116,6 +1147,13 @@ function history(pos, opt) {
   const recs = projectObservations(project).filter((o) => byDay ? localDay(o.ts) === target : o.session.startsWith(target)).sort((a, b) => a.ts - b.ts).slice(-200);
   if (!recs.length)
     return `Nothing recorded for "${target}" in ${project}.`;
+  const ids = [...new Set(recs.map((o) => o.session))];
+  if (!byDay && ids.length > 1)
+    return [
+      `"${target}" matches ${ids.length} sessions; use a longer prefix:`,
+      ...ids.map((i) => `- ${i}`)
+    ].join(`
+`);
   return [
     `Timeline for ${target} in ${project}:`,
     ...recs.map((o) => {

@@ -78,6 +78,13 @@ const leaks: Array<[string, string, string]> = [
     "Zq9Lm2Xw0123",
   ],
   ["passphrase", "private_key_passphrase=Zq9Lm2Xw", "Zq9Lm2Xw"],
+  ["sql create user", "CREATE USER bi PASSWORD 'Sup3rSecret!99';", "Sup3rSecret"],
+  ["sql identified by", 'ALTER USER bi IDENTIFIED BY "Sup3rSecret!99";', "Sup3rSecret"],
+  [
+    "environ subscript",
+    'os.environ["WAREHOUSE_API_TOKEN"] = "zq8Lm2Vx9Rt4Yw7Pb3Nc"',
+    "zq8Lm2Vx9Rt4",
+  ],
 ];
 
 describe("sanitize", () => {

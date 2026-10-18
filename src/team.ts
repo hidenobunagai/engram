@@ -94,8 +94,8 @@ export function normalizeRemote(url: string): string {
     .replace(/^[^@/]+@/, "")
     .replace(/^([^/:]+):(?!\d+\/)/, "$1/")
     .replace(/^([^/:]+):\d+\//, "$1/")
-    .replace(/\.git$/, "")
     .replace(/\/+$/, "")
+    .replace(/\.git$/i, "")
     .toLowerCase();
 }
 
@@ -124,9 +124,20 @@ export function teamScope(cwd: string): Scope {
   const file = join(sharedStore(), "scope.json");
   if (!existsSync(file))
     return { inScope: true, reason: "no scope.json in the team store (all projects)" };
-  let cfg: { projects?: string[]; paths?: string[] };
+  let cfg: { projects: string[]; paths: string[] };
   try {
-    cfg = JSON.parse(readFileSync(file, "utf-8"));
+    const raw = JSON.parse(readFileSync(file, "utf-8"));
+    const strings = (v: unknown) =>
+      v === undefined || (Array.isArray(v) && v.every((x) => typeof x === "string"));
+    if (
+      !raw ||
+      typeof raw !== "object" ||
+      Array.isArray(raw) ||
+      !strings(raw.projects) ||
+      !strings(raw.paths)
+    )
+      throw new Error('expected {"projects": [strings], "paths": [strings]}');
+    cfg = { projects: raw.projects || [], paths: raw.paths || [] };
   } catch (e) {
     return { inScope: false, reason: `scope.json is invalid: ${(e as Error).message}` };
   }
@@ -134,13 +145,13 @@ export function teamScope(cwd: string): Scope {
   const remote = gitRemote(root);
   const norm = remote ? normalizeRemote(remote) : "";
   const hitProject = norm
-    ? (cfg.projects || []).find((p) => globMatch(normalizeRemote(p), norm))
+    ? cfg.projects.find((p) => globMatch(normalizeRemote(p), norm))
     : undefined;
   if (hitProject) return { inScope: true, reason: `remote ${norm} matches "${hitProject}"` };
   const path = root.replace(/\\/g, "/");
   const home = homedir().replace(/\\/g, "/");
-  const hitPath = (cfg.paths || []).find((p) =>
-    globMatch(p.replace(/^~(?=\/|$)/, home).replace(/\\/g, "/"), path),
+  const hitPath = cfg.paths.find((p) =>
+    globMatch(p.replace(/\\/g, "/").replace(/^~(?=\/|$)/, home), path),
   );
   if (hitPath) return { inScope: true, reason: `path ${path} matches "${hitPath}"` };
   return {

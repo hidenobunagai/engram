@@ -55,11 +55,13 @@ const RULES: Array<[RegExp, string | ((m: string, ...g: string[]) => string)]> =
   // Numbers and booleans are skipped so `token_count = 3` style SQL survives.
   [
     new RegExp(
-      `(\\b(?:[A-Za-z0-9]+_)*(?:${KV_KEYS})(?:_(?:prod|dev|test|stg|staging|\\d+))?["']?\\s*[:=]\\s*)${NOT_LITERAL}(?:${VALUE})`,
+      `(\\b(?:[A-Za-z0-9]+_)*(?:${KV_KEYS})(?:_(?:prod|dev|test|stg|staging|\\d+))?["']?\\]?\\s*[:=]\\s*)${NOT_LITERAL}(?:${VALUE})`,
       "gi",
     ),
     "$1[REDACTED_SECRET]",
   ],
+  // SQL DDL: CREATE USER x PASSWORD 'v', IDENTIFIED BY 'v'
+  [/(\b(?:password|identified\s+by)\s+)(?:'[^']*'|"[^"]*")/gi, "$1[REDACTED_SECRET]"],
   [/(\b(?:mysql|mariadb|mysqldump|mysqladmin)\b[^\n|;&]*?\s-p)[^\s-]\S*/g, "$1[REDACTED_SECRET]"],
   [/(\s(?:-u|--user)\s+[^\s:]+:)\S+/g, "$1[REDACTED_SECRET]"],
   [/(Authorization:\s*(?:Token|Key|ApiKey))\s+\S+/gi, "$1 [REDACTED_TOKEN]"],

@@ -28,13 +28,13 @@ relevant. Sharing with the team is a secondary, opt-in step.
 
 ## Hooks
 
-| Event                | Mode  | Behavior                                                                                                                                                                                                                                                                                                                                                                                  |
-| -------------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SessionStart`       | sync  | Prune old observations; print the previous session's recap, the project's 5 latest notes, the team index (about 6 KB at most, in scope only) and a note count                                                                                                                                                                                                                             |
-| `UserPromptSubmit`   | sync  | Search memory with the prompt and print up to 5 matches within 1.5 KB; record the prompt and update the recap                                                                                                                                                                                                                                                                             |
-| `PostToolUse`        | async | For `Bash`, file-writing tools and `mcp__*` tools, record the command (Bash); `<tool> <path>` plus the written text for code files (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`); or the `sql`/`query`/`statement`/`command` string fields of the input (MCP; calls without one are skipped). Commands whose every chained segment is trivial (`ls`, `cat`, `git status`, …) are skipped |
-| `PostToolUseFailure` | async | Same, plus the error text (head and tail kept, 1,000 characters at most)                                                                                                                                                                                                                                                                                                                  |
-| `Stop`               | async | Store Claude's last reply in the recap                                                                                                                                                                                                                                                                                                                                                    |
+| Event                | Mode  | Behavior                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| -------------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SessionStart`       | sync  | Prune old observations; print the previous session's recap, the project's 5 latest notes, the team index (about 6 KB at most, in scope only) and a note count                                                                                                                                                                                                                                                                                                                                        |
+| `UserPromptSubmit`   | sync  | Search memory with the prompt and print up to 5 matches within 1.5 KB; record the prompt and update the recap                                                                                                                                                                                                                                                                                                                                                                                        |
+| `PostToolUse`        | async | For `Bash`, file-writing tools and `mcp__*` tools, record the command (Bash); `<tool> <path>` plus the written text for code files (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`; notebooks keep cell source only, and delimited-data text or a `.sql` file without SQL keeps the path only); or the `sql`/`query`/`statement`/`command` string fields of the input (MCP; calls without one are skipped). Commands whose every chained segment is trivial (`ls`, `cat`, `git status`, …) are skipped |
+| `PostToolUseFailure` | async | Same, plus the error text (head and tail kept, 1,000 characters at most)                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `Stop`               | async | Store Claude's last reply in the recap                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 Plain stdout is used for injection because it works for both `SessionStart` and `UserPromptSubmit`.
 Injected text is phrased as factual statements.
@@ -46,9 +46,8 @@ Root: `ENGRAM_HOME` or `~/.claude/engram-memory/`.
 - `obs/<project>/<session>.jsonl`: `{t:"obs", id, ts, session, project, tool, input, error?}`. One file
   per session, appended one line per record, so concurrent hooks never rewrite each other's data.
   Deleted after `ENGRAM_RETENTION_DAYS` (default 90) without changes.
-- `notes.jsonl`: `{t:"note", id, ts, project, kind, title, body, tables?, tags?, team?}`. The latest
-  record per id wins. `team` marks a note saved inside the team scope. Saving the same kind, title and
-  body reuses the id. `forget` rewrites the file without the note.
+- `notes.jsonl`: `{t:"note", id, ts, project, kind, title, body, tables?, tags?, root?}`. The latest
+  record per id wins. `root` is the project root at save time. Saving the same project, kind, title and body reuses the id. `forget` rewrites the file without the note.
 - `recaps/<project>.json`: the latest session's first and last prompt and last reply.
 
 `project` = basename of the git root plus the first 8 hex characters of the SHA-1 of its path.
@@ -79,7 +78,7 @@ Jaccard similarity of at least 0.3.
   - prompts: 0.5
 - Prompt-time recall needs the matched terms' IDF to reach `min(3, half the IDF of the query terms
 present in the corpus)`. It leaves out the current session and past prompts, and collapses identical
-  lines. A shared note is indexed once, through its team copy. Fix notes show the working command.
+  lines; all edits of one file collapse to one line. A shared note is indexed once, through its team copy. Fix notes show the working command.
 - Notes are searched across all projects, because analysts query the same warehouse from many folders.
   Observations are searched only within their own project.
 
@@ -94,8 +93,9 @@ present in the corpus)`. It leaves out the current session and past prompts, and
 - Scope: in scope when the project has a `.engram/` folder, when `<shared store>/scope.json` is absent,
   or when its `projects` globs match the normalized origin remote (read from `.git/config`, worktrees
   via `commondir`) or its `paths` globs match the project root. Out of scope, `loadTeam` returns
-  nothing (no injection, no team recall) and notes are saved without `team`, so `share` refuses them.
-- `share` without an id lists `team` notes not yet in the team store. `share <id>` writes a JSON-quoted frontmatter that round-trips safely. If a different item already uses
+  nothing (no injection, no team recall) and `share` refuses notes whose `root` is out of scope; scope is re-checked at share time, so a note
+  saved before `scope.json` existed, or without `root`, is not shareable.
+- `share` without an id lists in-scope notes not yet in the team store. `share <id>` writes a JSON-quoted frontmatter that round-trips safely. If a different item already uses
   the same file name, `share` adds a suffix instead of overwriting it. Committing is left to the user.
 
 ## History

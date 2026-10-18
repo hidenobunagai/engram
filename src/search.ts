@@ -14,6 +14,8 @@ export interface Doc {
   weight: number;
   /** Text shown when the doc is injected or listed; defaults to `text`. */
   display?: string;
+  /** Docs sharing a group collapse to the best hit (e.g. all edits of one file). */
+  group?: string;
   ref?: string;
 }
 

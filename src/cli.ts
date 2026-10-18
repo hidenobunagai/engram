@@ -11,6 +11,7 @@ import {
 } from "./hooks";
 import {
   type Kind,
+  type Note,
   KINDS,
   allNotes,
   dataDir,
@@ -20,6 +21,7 @@ import {
   localTime,
   projectId,
   projectObservations,
+  projectRoot,
   saveNote,
 } from "./memory";
 import { search } from "./search";
@@ -110,17 +112,23 @@ function save(opt: Record<string, string>): string {
     body: body.trim() || opt.title,
     tables: list(opt.tables),
     tags: list(opt.tags),
-    team: teamScope(process.cwd()).inScope,
+    root: projectRoot(process.cwd()),
   });
-  return `Saved ${note.kind} ${note.id}: ${note.title}${note.team ? "" : " (personal only: outside the team scope)"}`;
+  const personal = teamScope(process.cwd()).inScope
+    ? ""
+    : " (personal only: outside the team scope)";
+  return `Saved ${note.kind} ${note.id}: ${note.title}${personal}`;
 }
 
-/** Without an id: the newest notes saved inside the team scope that are not in the team store yet. */
+/** The scope is checked now, against the project the note came from; notes without one stay personal. */
+const shareable = (n: Note) => !!n.root && teamScope(n.root).inScope;
+
+/** Without an id: the newest shareable notes that are not in the team store yet. */
 function share(id: string | undefined, opt: Record<string, string>): string {
   if (!id) {
     const shared = new Set(loadTeam(process.cwd()).items.map((t) => t.id));
     const candidates = allNotes()
-      .filter((n) => n.team && !shared.has(n.id))
+      .filter((n) => !shared.has(n.id) && shareable(n))
       .sort((a, b) => b.ts - a.ts)
       .slice(0, 20);
     if (!candidates.length)
@@ -133,10 +141,10 @@ function share(id: string | undefined, opt: Record<string, string>): string {
   }
   const note = allNotes().find((n) => n.id === id);
   if (!note) throw new Error(`No saved note with id "${id}". Find ids with: engram recall <words>`);
-  if (!note.team) {
+  if (!shareable(note)) {
     throw new Error(
-      `${id} was saved outside the team scope, so it stays personal. ` +
-        "Add the project to scope.json in the team repository (or add a .engram/ folder) and save it again there.",
+      `${id} comes from a project outside the team scope (${note.root || "unknown project"}), so it stays personal. ` +
+        "Add that project to scope.json in the team repository, or give it a .engram/ folder.",
     );
   }
   const base = opt.to || teamDirs(process.cwd())[0];
@@ -163,7 +171,8 @@ function history(pos: string[], opt: Record<string, string>): string {
   const target = pos.find((p) => p !== "--all");
   if (!target) {
     const all = pos.includes("--all");
-    const sessions = listSessions(all ? undefined : project).slice(0, Number(opt.limit) || 15);
+    const limit = Math.floor(Number(opt.limit));
+    const sessions = listSessions(all ? undefined : project).slice(0, limit > 0 ? limit : 15);
     if (!sessions.length) return "No recorded sessions.";
     return [
       `Sessions${all ? "" : ` in ${project}`} (newest first):`,
@@ -182,6 +191,12 @@ function history(pos: string[], opt: Record<string, string>): string {
     .sort((a, b) => a.ts - b.ts)
     .slice(-200);
   if (!recs.length) return `Nothing recorded for "${target}" in ${project}.`;
+  const ids = [...new Set(recs.map((o) => o.session))];
+  if (!byDay && ids.length > 1)
+    return [
+      `"${target}" matches ${ids.length} sessions; use a longer prefix:`,
+      ...ids.map((i) => `- ${i}`),
+    ].join("\n");
   return [
     `Timeline for ${target} in ${project}:`,
     ...recs.map((o) => {
