@@ -1,0 +1,23 @@
+{
+  "name": "engram",
+  "version": "0.1.0",
+  "description": "Team memory and knowledge base for data analysts in Claude Code",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "test": "bun test",
+    "test:coverage": "bun test --coverage",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@dotenvx/dotenvx": "^1.38.4"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^22.10.1",
+    "prettier": "^3.5.1",
+    "typescript": "^5.7.3"
+  }
+}

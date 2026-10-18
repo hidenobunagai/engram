@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.DS_Store
+*.local.db
+*.local.db-journal
+*.local.db-wal
+*.local.db-shm
+
+# dotenvx keys
+.env.keys
+.env*.local
