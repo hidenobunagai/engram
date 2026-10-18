@@ -1,7 +1,7 @@
 {
   "name": "engram",
-  "version": "0.1.0",
-  "description": "Team memory and knowledge base for data analysts in Claude Code",
+  "version": "0.2.0",
+  "description": "Automatic working memory for data analysts in Claude Code, with optional team sharing",
   "author": {
     "name": "hidenobunagai",
     "url": "https://github.com/hidenobunagai"

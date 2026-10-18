@@ -2,6 +2,7 @@
 id: "met-mau"
 kind: "metric"
 title: "Monthly Active Users (MAU)"
+summary: "Distinct users with a qualifying event in the calendar month, internal accounts excluded."
 target_tables: ["fct_user_activity", "dim_users"]
 tags: ["kpi", "engagement", "executive"]
 author: "growth-analyst"

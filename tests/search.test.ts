@@ -1,68 +1,50 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, rmSync } from "fs";
-import { join } from "path";
-import { GitKnowledgeStore } from "../src/core/git-store";
-import { HybridSearchEngine } from "../src/core/search";
-import { LocalStorage } from "../src/core/storage";
+import { describe, expect, it } from "bun:test";
+import { type Doc, search, tokenize } from "../src/search";
 
-const TEST_DIR = join(import.meta.dir, "tmp-search-test");
+const doc = (id: string, title: string, text: string, weight = 1): Doc => ({
+  id,
+  source: "note",
+  kind: "caveat",
+  title,
+  text,
+  ts: 0,
+  weight,
+});
 
-describe("HybridSearchEngine", () => {
-  let gitStore: GitKnowledgeStore;
-  let localStorage: LocalStorage;
-  let engine: HybridSearchEngine;
-
-  beforeAll(() => {
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true, force: true });
-    mkdirSync(TEST_DIR, { recursive: true });
-
-    gitStore = new GitKnowledgeStore(TEST_DIR);
-    gitStore.initDirectories();
-
-    localStorage = new LocalStorage(":memory:");
-    engine = new HybridSearchEngine(gitStore, localStorage);
-
-    // Populate Git store with a caveat
-    gitStore.save({
-      id: "cav-orders-null",
-      kind: "caveat",
-      title: "Orders NULL User ID",
-      target_tables: ["fct_orders"],
-      tags: ["orders", "guest-checkout"],
-      created_at: "2026-10-18",
-      body: "Guest orders have NULL user_id. Filter user_id IS NOT NULL for registered user retention.",
-    });
-
-    // Populate Local store with an observation
-    localStorage.saveObservation({
-      id: "obs-query-1",
-      sessionId: "s1",
-      project: "test-proj",
-      toolName: "run_sql",
-      title: "Query run on fct_orders",
-      content: "Executed cohort retention query on fct_orders successfully.",
-      isError: false,
-    });
+describe("tokenize", () => {
+  it("keeps identifiers whole and splits dotted names", () => {
+    expect(tokenize("SELECT * FROM analytics.dim_users")).toEqual([
+      "analytics.dim_users",
+      "analytics",
+      "dim_users",
+      "users",
+    ]);
+    expect(tokenize("mart_mau")).toEqual(["mart_mau", "mau"]);
   });
-
-  afterAll(() => {
-    localStorage.close();
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true, force: true });
+  it("makes CJK bigrams", () => {
+    expect(tokenize("売上計上")).toEqual(["売上", "上計", "計上"]);
+    expect(tokenize("集計して")).toEqual(["集計"]);
+    expect(tokenize("見たい")).toEqual([]);
   });
+});
 
-  it("prioritizes Git team knowledge over local observations", () => {
-    const results = engine.search({ query: "fct_orders", limit: 5 });
-    expect(results.length).toBeGreaterThan(0);
-
-    // Git knowledge should be first due to higher weight
-    expect(results[0].source).toBe("git");
-    expect(results[0].title).toBe("Orders NULL User ID");
-  });
-
-  it("builds a concise prompt context block", () => {
-    const context = engine.buildContextBlock();
-    expect(context).toContain("# Team Data Knowledge (from .engram/)");
-    expect(context).toContain("⚠️ Known Data Caveats & Table Quirks:");
-    expect(context).toContain("Orders NULL User ID");
+describe("search", () => {
+  const docs = [
+    doc("a", "Soft deletes in dim_users", "filter deleted_at IS NULL"),
+    doc("b", "MAU definition", "count distinct user_id over 28 days"),
+    doc("c", "返品の計上タイミング", "返品は翌月に計上する"),
+    doc("d", "Unrelated", "pipeline schedule for marketing"),
+  ];
+  it("finds by table name", () =>
+    expect(search(docs, "join dim_users to orders")[0]?.doc.id).toBe("a"));
+  it("finds Japanese text", () => expect(search(docs, "返品はいつ計上？")[0]?.doc.id).toBe("c"));
+  it("returns nothing for unrelated prompts", () =>
+    expect(search(docs, "fix the CSS of the button")).toEqual([]));
+  it("applies weights", () => {
+    const hits = search(
+      [doc("x", "dim_users", "a", 1), doc("y", "dim_users", "a", 2), doc("z", "other", "b")],
+      "dim_users",
+    );
+    expect(hits[0].doc.id).toBe("y");
   });
 });

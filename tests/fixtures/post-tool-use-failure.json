@@ -1,0 +1,20 @@
+{
+  "session_id": "11111111-1111-1111-1111-111111111111",
+  "transcript_path": "/tmp/transcript.jsonl",
+  "cwd": "/work/analytics",
+  "prompt_id": "37baf6b3-5ce1-4f65-9f7d-063a1de3579f",
+  "permission_mode": "bypassPermissions",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PostToolUseFailure",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "ls /nonexistent_dir_xyz",
+    "description": "List nonexistent directory to check error"
+  },
+  "tool_use_id": "toolu_01GJh1dsWtDN4P6BEEagJq9h",
+  "error": "Exit code 2\nls: cannot access '/nonexistent_dir_xyz': No such file or directory",
+  "is_interrupt": false,
+  "duration_ms": 49
+}

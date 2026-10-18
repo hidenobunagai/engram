@@ -2,6 +2,7 @@
 id: "cav-users-soft-deletes"
 kind: "caveat"
 title: "Soft deletes in dim_users"
+summary: "dim_users keeps deleted accounts; filter deleted_at IS NULL for active users."
 target_tables: ["dim_users", "fct_orders"]
 tags: ["users", "retention", "joins"]
 author: "data-lead"

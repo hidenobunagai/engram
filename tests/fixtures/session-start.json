@@ -1,0 +1,7 @@
+{
+  "session_id": "11111111-1111-1111-1111-111111111111",
+  "transcript_path": "/tmp/transcript.jsonl",
+  "cwd": "/work/analytics",
+  "hook_event_name": "SessionStart",
+  "source": "startup"
+}

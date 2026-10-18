@@ -1,0 +1,15 @@
+{
+  "session_id": "11111111-1111-1111-1111-111111111111",
+  "transcript_path": "/tmp/transcript.jsonl",
+  "cwd": "/work/analytics",
+  "prompt_id": "37baf6b3-5ce1-4f65-9f7d-063a1de3579f",
+  "permission_mode": "bypassPermissions",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "done\n\n- `echo hello`: 出力は `hello`（成功）\n- `ls /nonexistent_dir_xyz`: 終了コード 2、`ls: cannot access '/nonexistent_dir_xyz': No such file or directory`\n\n2つのコマンドは別々の Bash 呼び出しで実行しました。",
+  "background_tasks": [],
+  "session_crons": []
+}
