@@ -1,10 +1,7 @@
 node_modules/
-dist/
 .DS_Store
-*.local.db
-*.local.db-journal
-*.local.db-wal
-*.local.db-shm
+
+# dist/ is committed on purpose: plugin installs do not run npm install or a build.
 
 # dotenvx keys
 .env.keys

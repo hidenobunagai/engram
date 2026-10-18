@@ -1,0 +1,8 @@
+{
+  "session_id": "11111111-1111-1111-1111-111111111111",
+  "transcript_path": "/tmp/transcript.jsonl",
+  "cwd": "/work/analytics",
+  "prompt_id": "37baf6b3-5ce1-4f65-9f7d-063a1de3579f",
+  "hook_event_name": "SessionEnd",
+  "reason": "other"
+}

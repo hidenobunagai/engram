@@ -1,139 +1,100 @@
-# engram: Team Memory & Knowledge Base for Data Analysts in Claude Code
+# engram specification
 
-## 1. Overview & Motivation
+## Goal
 
-`engram` is a privacy-first, zero-overhead memory and knowledge base plugin designed for Data Analyst teams using Claude Code.
+Give each analyst a memory that fills itself while they work in Claude Code and comes back when it is
+relevant. Sharing with the team is a secondary, opt-in step.
 
-While software engineers primarily track code structure and dependencies, data analysts face a different set of challenges:
+## Constraints
 
-- **Data Caveats (Traps & Quirks)**: Undocumented NULL behavior, historical tracking outages, duplicate records, deleted flag logic.
-- **Metric Definitions**: Discrepancies in KPI calculations (e.g., active user definitions, ARR exclusions, churn window).
-- **Golden Queries**: Hard-won, peer-reviewed SQL snippets with complex window functions or CTEs that shouldn't be reinvented.
-- **Analytical Decisions**: Context behind outlier filtering, date window choices, and stakeholder agreements.
+- Runs on the analyst's machine with Node.js 18+ only. No npm install at plugin install time, no
+  native or WASM modules, no daemon, and no network calls.
+- Hooks must never break a session: any failure exits 0 and is logged to `<data dir>/error.log`.
+- Never store tool output or query results.
 
-`engram` unifies personal daily workflow memory with team-wide collective intelligence via a **Two-Tier Architecture**.
+## Components
 
----
+| Path               | Role                                                                                                |
+| ------------------ | --------------------------------------------------------------------------------------------------- |
+| `src/cli.ts`       | Entry point for hooks (`hook <event>`) and commands (`recall`, `save`, `forget`, `share`, `status`) |
+| `src/hooks.ts`     | Capture, error → fix pairing, prompt-time recall, session-start recap and team index                |
+| `src/memory.ts`    | JSONL storage, project ids, retention                                                               |
+| `src/search.ts`    | Tokenizer and BM25 ranking                                                                          |
+| `src/team.ts`      | Team Markdown store: discovery, frontmatter parsing, safe writes                                    |
+| `src/sanitizer.ts` | Secret and email redaction applied to everything written                                            |
+| `skills/*`         | `/engram:recall`, `/engram:save`, `/engram:share`, `/engram:status`                                 |
+| `dist/cli.mjs`     | Bundled build that hooks and skills run (committed)                                                 |
 
-## 2. Two-Tier Architecture
+## Hooks
 
-```
-                  ┌─────────────────────────────────────┐
-                  │          Claude Code Session        │
-                  └──────────────────┬──────────────────┘
-                                     │
-             ┌───────────────────────┴───────────────────────┐
-             ▼                                               ▼
-   【Tier 1: Personal Local】                      【Tier 2: Team Git】
-     ~/.claude/engram/local.db                       <repo>/.engram/
-    (Fast, Embedded SQLite FTS5)                    (Markdown / YAML in Git)
-┌─────────────────────────────────┐             ┌─────────────────────────────────┐
-│ • Daily working memory & errors │             │ • metrics/  (Official KPI defs) │
-│ • Observed queries & executions │             │ • caveats/  (Known data quirks) │
-│ • Auto-masked secrets           │             │ • queries/  (Golden SQLs)       │
-│ • No noise committed to git     │             │ • decisions/(Agreed logic)      │
-└─────────────────────────────────┘             └─────────────────────────────────┘
-                                                           │
-                                                           ▼ (git commit & push)
-                                                  Shared across the entire team!
-```
+| Event                | Mode  | Behavior                                                                                                                                                                                                                                                        |
+| -------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SessionStart`       | sync  | Prune old observations; print the previous session's recap, the team index (about 6 KB at most) and a note count                                                                                                                                                |
+| `UserPromptSubmit`   | sync  | Search memory with the prompt and print up to 5 matches within 1.5 KB; record the prompt and update the recap                                                                                                                                                   |
+| `PostToolUse`        | async | For `Bash` and `mcp__*` tools, record the command (Bash) or the `sql`/`query`/`statement`/`command` string fields of the input (MCP; calls without one are skipped). Commands whose every chained segment is trivial (`ls`, `cat`, `git status`, …) are skipped |
+| `PostToolUseFailure` | async | Same, plus the error text (head and tail kept, 1,000 characters at most)                                                                                                                                                                                        |
+| `Stop`               | async | Store Claude's last reply in the recap                                                                                                                                                                                                                          |
 
-### Tier 1: Personal Working Memory (Local SQLite)
+Plain stdout is used for injection because it works for both `SessionStart` and `UserPromptSubmit`.
+Injected text is phrased as factual statements.
 
-- **Zero-ops & Zero-Server**: No background daemon (like a Raspberry Pi or cloud server). Runs embedded using `bun:sqlite` with FTS5 trigram indexing.
-- **Automatic Capture**: Automatically tracks executed queries, script errors, and solutions within the user's local sessions.
-- **Private & Safe**: Never pushed to git. Automatically sanitizes database connection strings, passwords, and API keys before saving.
+## Storage
 
-### Tier 2: Team Curated Knowledge (Git-backed, Global-First & Hierarchical)
+Root: `ENGRAM_HOME` or `~/.claude/engram-memory/`.
 
-- **Global by Default (`~/.claude/engram/`)**: Data analysts work across diverse folders, but against the same company DWH. A single cloned repository in `~/.claude/engram/` makes company metrics and caveats instantly active across all project folders on the analyst's machine.
-- **Optional Project Overrides (`./.engram/`)**: When present, project-local knowledge files are merged, overriding global items with identical IDs.
-- **Collaborative Review**: Team members update metrics and data caveats via normal Pull Requests in the shared knowledge Git repository.
-- **Automatic Context Injection**: At the start of every Claude Code session (`session.start`), `engram` scans active knowledge stores and injects verified business rules and data traps directly into Claude's prompt context.
+- `obs/<project>/<session>.jsonl`: `{t:"obs", id, ts, session, project, tool, input, error?}`. One file
+  per session, appended one line per record, so concurrent hooks never rewrite each other's data.
+  Deleted after `ENGRAM_RETENTION_DAYS` (default 90) without changes.
+- `notes.jsonl`: `{t:"note", id, ts, project, kind, title, body, tables?, tags?}`. The latest record
+  per id wins. `forget` rewrites the file without the note.
+- `recaps/<project>.json`: the latest session's first and last prompt and last reply.
 
----
+`project` = basename of the git root plus the first 8 hex characters of the SHA-1 of its path.
 
-## 3. Data Model for Analysts
+## Error → fix pairing
 
-### Knowledge Types (`kind`)
+When a tool call succeeds, engram scans the last 15 records of the same session, newest first, for a
+record from the same tool that is similar to it. Similar means the same Bash command name, or a token
+Jaccard similarity of at least 0.3.
 
-1. **`caveat`** (Data traps & table quirks)
-   - Target tables/columns, outage timeframes, join risks, and recommended filters.
-2. **`metric`** (KPI & business logic definitions)
-   - Calculation formulas, SQL fragments, aggregation grains, and business rationale.
-3. **`query`** (Golden / Canonical SQL)
-   - Tested analytical queries, complex CTEs, dashboard base queries.
-4. **`decision`** (Analytical decisions & assumptions)
-   - Why certain cohorts were excluded, methodology choices, stakeholder sign-offs.
-5. **`fact`** (Data warehouse schema & pipeline facts)
-   - Table update cadence, SLA, grain, source upstream systems.
+- If the first similar record is a failure, engram saves a `fix` note. The note holds the failed input,
+  the error and the working input. Its title comes from the error's headline line: the last line of a
+  traceback, otherwise the first line.
+- If the first similar record is a success, engram stops. A failure that an earlier success in the
+  window already resolved is not paired again, so one error is paired at most once.
 
-### Git File Format (`.engram/<kind>/<slug>.md`)
+## Search
 
-````markdown
----
-id: cav-users-deleted-at
-kind: caveat
-title: Soft deletes in dim_users
-target_tables: ["dim_users", "fct_orders"]
-author: analyst-jane
-created_at: 2026-10-18
-tags: ["users", "retention", "joins"]
----
+- Tokens: lowercase ASCII identifiers kept whole (`analytics.dim_users`), plus their `.` parts and
+  their `_` parts longer than 2 characters, minus warehouse prefixes (`dim`, `fct`, `stg`, `mart`, …).
+  CJK runs become character bigrams, except bigrams containing hiragana. SQL keywords and common
+  English words are dropped.
+- Ranking: BM25 (k1 1.2, b 0.75) times a source weight:
+  - team items: 1.5
+  - notes from this project: 1.3; notes from other projects: 1.1
+  - failed calls: 1.0
+  - successful calls: 0.6
+  - prompts: 0.5
+- Prompt-time recall needs the matched terms' IDF to reach `min(3, half the IDF of the query terms
+present in the corpus)`. It leaves out the current session and past prompts, and collapses identical
+  lines. A shared note is indexed once, through its team copy. Fix notes show the working command.
+- Notes are searched across all projects, because analysts query the same warehouse from many folders.
+  Observations are searched only within their own project.
 
-### Problem
+## Team store
 
-`dim_users` contains soft-deleted users where `is_deleted = true` or `deleted_at IS NOT NULL`.
-Joining `dim_users` without filtering out deleted users causes inflated cohort counts.
+- Discovery: `ENGRAM_TEAM_DIR` alone, or else the nearest `.engram/` up to the git root plus
+  `~/.claude/engram-team/`. A higher-priority store overrides items with the same `id`.
+- Folders: `caveats metrics queries decisions facts fixes notes`.
+- Frontmatter: `id`, `title` (both required), plus `kind`, `summary`, `target_tables`, `tags`, `author`,
+  `status`, `created_at`. Lists may be inline, block or a single scalar. Files with `status: deprecated`
+  are hidden.
+- `share` writes a JSON-quoted frontmatter that round-trips safely. If a different item already uses
+  the same file name, `share` adds a suffix instead of overwriting it. Committing is left to the user.
 
-### Recommended Pattern
+## Known limits
 
-```sql
-SELECT ...
-FROM dim_users u
-WHERE u.deleted_at IS NULL
-```
-````
-
-```
-
----
-
-## 4. Security & Sanitization
-
-1. **Local-First & No Outbound Calls**:
-   - All searches (FTS5 trigram) run in-process on the local machine.
-   - Does not send internal schema or queries to third-party compression APIs.
-2. **Secret Redaction**:
-   - Automated regex masking for:
-     - Database connection strings (`postgresql://...`, `snowflake://...`, `bigquery://...`)
-     - API keys, JWTs, Bearer tokens, AWS access keys, private keys
-     - Replaces secrets with `[REDACTED_SECRET]` before writing to local DB or `.engram/`.
-3. **Project Isolation**:
-   - Local DB partitions session observations by repository root hash to avoid cross-project contamination.
-
----
-
-## 5. Claude Code Plugin Lifecycle
-
-### Hooks
-- **`session.start`**:
-  - Scans `<repo>/.engram/` for metrics, caveats, and golden queries.
-  - Injects top relevant caveats and recent session context into the conversation.
-- **`turn.step`**:
-  - Observes tool use: SQL query runs, python script runs, error messages, and successful fixes.
-  - Sanitizes and stores them into the local observations table.
-- **`session.end`**:
-  - Summarizes key takeaways and updates session metadata.
-
-### Slash Commands
-- `/engram:recall <query>`: Cross-searches local session history and git-backed team knowledge.
-- `/engram:caveat <table-or-title>`: Quickly records a new data trap into `.engram/caveats/` ready for git commit.
-- `/engram:metric <metric-name>`: Drafts an official metric definition with SQL logic.
-- `/engram:share`: Interactive wizard to export valuable findings from the current session into `.engram/` files.
-- `/engram:status`: Displays loaded caveats, metrics, and local session stats.
-
-### Agent Tools
-- `engram_recall(query, kind?, limit?)`: Agent tool to search data caveats and metrics before executing queries.
-- `engram_save(kind, title, content, tables?, tags?)`: Agent tool to persist a new insight.
-```
+- Search reads every record of the project on each prompt. With 20,000 observations it takes about
+  0.25 s on a Raspberry Pi 5. Add a cached index if that grows.
+- Redaction is regex based. Unusual secret formats and personal data in SQL literals can pass through.
+- Fix pairing is heuristic and can pair unrelated calls that share a command name.

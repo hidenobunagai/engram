@@ -1,97 +1,131 @@
-# engram 🧠
+# engram
 
-**Team Memory & Knowledge Base for Data Analysts in Claude Code.**
+**Automatic working memory for data analysts in Claude Code, with optional team sharing.**
 
-`engram` helps data analyst teams eliminate recurring mistakes, retain business metric definitions, and share data caveats directly inside Claude Code.
+engram records the queries you run and the errors you hit while working with Claude Code. When a
+later prompt touches the same tables or problems, it adds the matching memories to that prompt.
+If you want, you can promote a memory into a Markdown file that your team reviews in git.
 
----
+- **Automatic capture**: Bash commands and SQL sent through MCP tools, including failures, are
+  stored locally after secrets are redacted. Query results and command output are never stored.
+- **Error → fix pairs**: when a failing command is followed by a similar command that works, engram
+  saves the pair as a durable `fix` note. Example: `Unrecognized name: signup_dt` followed by a query
+  that uses `signup_date`.
+- **Recall on every prompt**: matching notes, fixes, past errors and team items are added to the
+  prompt (up to about 1.5 KB, and only when something matches).
+- **Session recap**: a new session starts with what the previous session in the same repository was
+  about.
+- **Team sharing (optional)**: `/engram:share` writes a note as Markdown into a team git repository.
+  Every teammate's session gets an index of those files.
+- **No runtime dependencies**: one bundled `dist/cli.mjs` running on Node.js 18 or newer. No npm
+  install, no native modules, no server.
 
-## ✨ Features
+## Requirements
 
-- **🛡️ Data Caveats & Traps**: Remind Claude automatically about table quirks, NULL behavior, tracking outages, and JOIN pitfalls before queries are generated.
-- **📐 Canonical Metric Definitions**: Maintain team-wide KPI calculation rules with tested SQL snippets.
-- **🤝 Two-Tier Architecture**:
-  - **Local Tier (Private SQLite)**: Zero-server personal working memory, error observations, and query histories.
-  - **Git Tier (`.engram/`)**: Markdown files for team-reviewed definitions, reviewed via Pull Requests.
-- **🔒 Privacy & Secret Masking**: Auto-redacts database credentials, tokens, and API keys. Completely local-first with zero external API calls.
-- **⚡ Native Claude Code Integration**: Hooks into `session.start`, `turn.step`, and `session.end` with slash commands and agent tools.
+- Claude Code
+- Node.js 18 or newer on `PATH` (`node -v`). If you installed Claude Code with npm, you already have it.
 
----
-
-## 🚀 Quick Start
-
-### Installation via Claude Code Plugin Marketplace
-
-You can install `engram` directly inside Claude Code:
-
-```bash
-# In Claude Code chat:
-/plugin install engram --marketplace hidenobunagai/engram
-```
-
-Or from your terminal:
+## Install
 
 ```bash
 claude plugin marketplace add hidenobunagai/engram
 claude plugin install engram@engram-marketplace
 ```
 
-### Development Setup
+Or, inside Claude Code: `/plugin marketplace add hidenobunagai/engram`, then `/plugin install engram@engram-marketplace`.
 
-Clone the repository and install dependencies with `bun`:
+## Commands
+
+| Command                   | What it does                                                             |
+| ------------------------- | ------------------------------------------------------------------------ |
+| `/engram:recall <words>`  | Search memory and team knowledge                                         |
+| `/engram:save <finding>`  | Save a caveat, metric definition, query, decision, fact or fix           |
+| `/engram:share <note-id>` | Write a saved note as a team Markdown file (you commit it and open a PR) |
+| `/engram:status`          | Show what is stored, the team stores in use, and any invalid team files  |
+
+Claude can call `recall` and `save` on its own when they fit, for example before writing SQL against a
+table it saw fail earlier.
+
+## What is stored, and where
+
+Personal memory lives in `~/.claude/engram-memory/` (set `ENGRAM_HOME` to move it). This folder is
+outside the plugin's install folder, so uninstalling the plugin does not delete it.
+
+| File                            | Content                                                                               | Kept                              |
+| ------------------------------- | ------------------------------------------------------------------------------------- | --------------------------------- |
+| `obs/<project>/<session>.jsonl` | One line per prompt or tool call: the command or SQL, and the error text if it failed | 90 days (`ENGRAM_RETENTION_DAYS`) |
+| `notes.jsonl`                   | Saved notes and automatic fixes                                                       | Until `forget`                    |
+| `recaps/<project>.json`         | First and last prompt plus Claude's last reply of the latest session                  | Overwritten                       |
+
+`<project>` is derived from the git repository root, so subfolders of one repository share a single memory.
+
+**Not stored**: command output, query results, file contents. This keeps customer rows out of the memory.
+For failed calls, the error message is stored (head and tail, at most 1,000 characters). Some database
+errors quote the offending value, so redaction also runs on it.
+
+**Redaction**: database URIs with passwords, `password=`/`token=`-style values (including JSON keys and
+`*_PASSWORD` env vars), `mysql -p…`, `curl -u user:pass`, PEM private keys, Authorization headers, JWTs,
+AWS, GitHub, OpenAI, Anthropic, Stripe, Slack, Google, GitLab and Databricks keys, secrets stated in prose
+("the password is …", "パスワードは…"), email addresses, phone numbers and card numbers are replaced before
+anything is written. Regex redaction is best effort, not a guarantee. Other personal data such as customer IDs or
+names inside SQL literals is not detected.
+
+**Network**: engram makes no network calls. Text it injects into prompts is sent to the model like any
+other context.
+
+Set `ENGRAM_DISABLE_CAPTURE=1` to stop recording while keeping recall.
+
+## Team knowledge (optional)
+
+engram reads team Markdown files from the first of:
+
+1. `ENGRAM_TEAM_DIR`, if set (only this store is used)
+2. the nearest `.engram/` folder between the current directory and the repository root, plus
+   `~/.claude/engram-team/` if that exists
+
+A common setup is one shared repository cloned to `~/.claude/engram-team`:
+
+```bash
+git clone git@github.com:your-company/analytics-knowledge.git ~/.claude/engram-team
+```
+
+engram does not pull for you. Run `git pull` there now and then, or schedule it.
+
+Layout and format (see `examples/team/`):
+
+```
+caveats/  metrics/  queries/  decisions/  facts/  fixes/  notes/
+```
+
+```markdown
+---
+id: "cav-users-soft-deletes"
+kind: "caveat"
+title: "Soft deletes in dim_users"
+summary: "dim_users keeps deleted accounts; filter deleted_at IS NULL for active users."
+target_tables: ["dim_users", "fct_orders"]
+tags: ["users", "retention"]
+status: "active" # "deprecated" hides the item
+---
+
+Details, SQL, and rationale.
+```
+
+`id` and `title` are required. Files without them are skipped and listed by `/engram:status`.
+
+## Development
+
+Development uses bun. The shipped artifact is plain Node.js.
 
 ```bash
 bun install
-bun test
+bun run test        # builds dist/cli.mjs, then runs unit and Node end-to-end tests
+NODE_BIN=/path/to/node18 bun test tests/e2e.test.ts
 ```
 
-### Knowledge Store Architecture (Global-First & Hierarchical)
+`dist/cli.mjs` is committed because plugin installs do not run a build. Rebuild it with `bun run build`
+before committing source changes.
 
-Data analysts frequently switch between multiple directories (ad-hoc queries, dbt, notebooks, scripts), but query the **same company data warehouse**.
-
-`engram` supports a **Hierarchical Knowledge Store**:
-
-1. **Global Store (`~/.claude/engram`) [Default & Recommended]**:
-   - Always active across all folders on your machine.
-   - Ideal for team-wide DWH caveats, table quirks, and KPI definitions.
-2. **Project Store (`./.engram/`) [Optional]**:
-   - If present in the current working directory, project-level items are automatically merged (and can override global items with matching IDs).
-3. **Environment Variable (`ENGRAM_DIR`)**:
-   - Overrides search paths to point directly to any shared folder or cloned repo.
-
-#### Recommended Team Workflow:
-
-Create a single central Git repository for your data analyst team's knowledge:
-
-```bash
-# Clone your team's knowledge repository directly to ~/.claude/engram:
-git clone git@github.com:your-company/dwh-knowledge.git ~/.claude/engram
-```
-
-Now, wherever you open Claude Code on your PC, all team metrics and data caveats are instantly loaded!
-
-```
-~/.claude/engram/ (or your-analytics-repo/.engram/)
-├── caveats/      # Known data traps & table quirks
-│   └── dim_users_soft_deletes.md
-├── metrics/      # Official KPI definitions & formulas
-│   └── monthly_active_users.md
-├── queries/      # Peer-reviewed golden SQL queries
-│   └── cohort_retention.md
-└── decisions/    # Analytical methodologies & agreements
-    └── fy26_churn_window.md
-```
-
-### Commands in Claude Code
-
-- `/engram:recall <query>`: Search both local history and team caveats/metrics.
-- `/engram:caveat <title>`: Record a new data quirk into `.engram/caveats/`.
-- `/engram:metric <name>`: Create or update a KPI definition.
-- `/engram:share`: Convert insights from the current session into shareable `.engram/` files.
-- `/engram:status`: Check current knowledge base statistics.
-
----
-
-## 📄 License
+## License
 
 MIT
