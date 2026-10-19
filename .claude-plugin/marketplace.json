@@ -10,7 +10,7 @@
       "name": "engram",
       "source": "./",
       "description": "Automatic working memory for data analysts in Claude Code, with optional team sharing",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "author": {
         "name": "hidenobunagai",
         "url": "https://github.com/hidenobunagai"

@@ -144,21 +144,31 @@ function firstWord(cmd: string): string {
   );
 }
 
+const SEGMENT = /&&|\|\||[;|\n]/;
+
+function trivialSegment(seg: string): boolean {
+  const s = seg.trim();
+  return !s || TRIVIAL.has(firstWord(s)) || /^git\s+(status|diff|log|show|branch)\b/.test(s);
+}
+
 /** Trivial only if every segment of a chained command is trivial: `cd x && bq query ...` is kept. */
 export function isTrivial(input: HookInput, text: string): boolean {
   if (input.tool_name !== "Bash") return false;
   if (/engram[\\/].*cli\.mjs|dist[\\/]cli\.mjs/.test(text)) return true;
-  return text.split(/&&|\|\||[;|\n]/).every((seg) => {
-    const s = seg.trim();
-    return !s || TRIVIAL.has(firstWord(s)) || /^git\s+(status|diff|log|show|branch)\b/.test(s);
-  });
+  return text.split(SEGMENT).every(trivialSegment);
+}
+
+function runPart(o: Observation): string {
+  if (o.tool !== "Bash") return o.input;
+  const segs = o.input.split(SEGMENT);
+  const first = segs.findIndex((s) => !trivialSegment(s));
+  return first === -1 ? o.input : segs.slice(first).join(" ");
 }
 
 function similar(a: Observation, b: Observation): boolean {
   if (a.tool !== b.tool) return false;
-  if (a.tool === "Bash" && firstWord(a.input) === firstWord(b.input)) return true;
-  const ta = new Set(tokenize(a.input));
-  const tb = new Set(tokenize(b.input));
+  const ta = new Set(tokenize(runPart(a)));
+  const tb = new Set(tokenize(runPart(b)));
   const inter = [...ta].filter((t) => tb.has(t)).length;
   return inter / (ta.size + tb.size - inter || 1) >= 0.3;
 }
