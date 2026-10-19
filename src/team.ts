@@ -13,7 +13,7 @@ import {
 import { homedir } from "os";
 import { dirname, join, resolve } from "path";
 import type { Kind } from "./memory";
-import { dataDir, projectRoot } from "./memory";
+import { dataDir, pathKey, projectRoot } from "./memory";
 import { sanitize } from "./sanitizer";
 
 /** Team knowledge: Markdown files with frontmatter in a shared folder (network drive or git clone). */
@@ -196,11 +196,7 @@ function globMatch(pattern: string, text: string): boolean {
 
 /** Forward slashes; case-insensitive on Windows, where C:\\Work and c:\\work are the same folder. */
 export function samePath(a: string, b: string): boolean {
-  const norm = (p: string) => {
-    const s = resolve(p).replace(/\\/g, "/").replace(/\/+$/, "");
-    return process.platform === "win32" ? s.toLowerCase() : s;
-  };
-  return norm(a) === norm(b);
+  return pathKey(a) === pathKey(b);
 }
 
 interface ScopeFile {
