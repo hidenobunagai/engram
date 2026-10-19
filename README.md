@@ -173,6 +173,9 @@ NODE_BIN=/path/to/node18 bun test tests/e2e.test.ts
 `dist/cli.mjs` is committed because plugin installs do not run a build. Rebuild it with `bun run build`
 before committing source changes.
 
+Installed copies stay on the version in `.claude-plugin/plugin.json` until it changes. Bump it (and
+the same field in `package.json` and `marketplace.json`) in every change meant to reach users.
+
 ## License
 
 MIT
