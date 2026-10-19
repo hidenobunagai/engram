@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "fs";
 import { homedir } from "os";
-import { basename, dirname, join, resolve } from "path";
+import { dirname, join, posix, resolve, win32 } from "path";
 import { sanitize } from "./sanitizer";
 
 export type Kind = "caveat" | "metric" | "query" | "decision" | "fact" | "fix" | "note";
@@ -110,11 +110,26 @@ export function projectRoot(cwd: string): string {
   }
 }
 
-export function projectId(cwd: string): string {
-  const root = projectRoot(cwd);
-  const hash = createHash("sha1").update(root).digest("hex").slice(0, 8);
-  const name = (basename(root) || "root").replace(/[^\w.-]/g, "_");
+/**
+ * Canonical form of a path for ids and comparisons. Windows paths are case-insensitive and Claude Code
+ * reports the same folder as both c:\\Users\\... and C:\\Users\\..., so they are lowercased with forward
+ * slashes there. Other platforms keep the resolved path, so their ids stay unchanged.
+ */
+export function pathKey(p: string, platform: string = process.platform): string {
+  const s = (platform === "win32" ? win32 : posix).resolve(p).replace(/\\/g, "/");
+  const trimmed = s.length > 1 ? s.replace(/\/+$/, "") : s;
+  return platform === "win32" ? trimmed.toLowerCase() : trimmed;
+}
+
+export function projectIdOfRoot(root: string, platform: string = process.platform): string {
+  const key = pathKey(root, platform);
+  const hash = createHash("sha1").update(key).digest("hex").slice(0, 8);
+  const name = (posix.basename(key) || "root").replace(/[^\w.-]/g, "_");
   return `${name}-${hash}`;
+}
+
+export function projectId(cwd: string): string {
+  return projectIdOfRoot(projectRoot(cwd));
 }
 
 function ensureDir(dir: string): string {
@@ -242,7 +257,9 @@ export function allNotes(): Note[] {
   const byId = new Map<string, Note>();
   for (const r of readLines<Note | Tombstone>(notesFile())) {
     if (r.t === "del") byId.delete(r.id);
-    else if (r.t === "note") byId.set(r.id, r);
+    // Notes that know their root re-derive the project, so ids from older key rules still match.
+    else if (r.t === "note")
+      byId.set(r.id, r.root ? { ...r, project: projectIdOfRoot(r.root) } : r);
   }
   return [...byId.values()];
 }

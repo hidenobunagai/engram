@@ -9,7 +9,15 @@ import {
   onStop,
   onToolUse,
 } from "../src/hooks";
-import { allNotes, forget, projectId, projectObservations, saveNote } from "../src/memory";
+import {
+  allNotes,
+  forget,
+  pathKey,
+  projectId,
+  projectIdOfRoot,
+  projectObservations,
+  saveNote,
+} from "../src/memory";
 import { joinTeam, sandbox } from "./helpers";
 
 const ev = (work: string, session: string, extra: object) =>
@@ -342,5 +350,28 @@ describe("file capture review regressions", () => {
     const ctx = onPrompt(ev(work, "s2", { prompt: "revenue from fct_orders paid status" }));
     expect(ctx.match(/report\.sql/g)?.length).toBe(1);
     expect(ctx).toContain("other.sql");
+  });
+});
+
+describe("windows path keys", () => {
+  it("treats c:\\ and C:\\ as the same project on win32 only", () => {
+    expect(pathKey("C:\\Users\\Me\\.claude", "win32")).toBe(
+      pathKey("c:\\users\\me\\.claude\\", "win32"),
+    );
+    expect(projectIdOfRoot("C:\\Users\\Me\\kpi", "win32")).toBe(
+      projectIdOfRoot("c:\\Users\\Me\\kpi", "win32"),
+    );
+    expect(projectIdOfRoot("/home/Me/kpi", "linux")).not.toBe(
+      projectIdOfRoot("/home/me/kpi", "linux"),
+    );
+  });
+
+  it("keeps Linux and macOS ids unchanged", () => {
+    // Same formula as before the change: sha1 of the resolved root.
+    const { createHash } = require("crypto");
+    const root = "/home/me/kpi";
+    expect(projectIdOfRoot(root, "linux")).toBe(
+      `kpi-${createHash("sha1").update(root).digest("hex").slice(0, 8)}`,
+    );
   });
 });

@@ -19,7 +19,7 @@ import {
   writeFileSync
 } from "fs";
 import { homedir } from "os";
-import { basename, dirname, join, resolve } from "path";
+import { dirname, join, posix, resolve, win32 } from "path";
 
 // src/sanitizer.ts
 var DB_SCHEMES = "postgresql|postgres|mysql|mariadb|snowflake|redshift|bigquery|mongodb|mongodb\\+srv|sqlserver|mssql|oracle|jdbc:[a-z]+|clickhouse|databricks|trino|presto|redis|rediss|amqps?|sftp|ftps?|smtps?|https?";
@@ -150,11 +150,19 @@ function projectRoot(cwd) {
     dir = parent;
   }
 }
-function projectId(cwd) {
-  const root = projectRoot(cwd);
-  const hash = createHash("sha1").update(root).digest("hex").slice(0, 8);
-  const name = (basename(root) || "root").replace(/[^\w.-]/g, "_");
+function pathKey(p, platform = process.platform) {
+  const s = (platform === "win32" ? win32 : posix).resolve(p).replace(/\\/g, "/");
+  const trimmed = s.length > 1 ? s.replace(/\/+$/, "") : s;
+  return platform === "win32" ? trimmed.toLowerCase() : trimmed;
+}
+function projectIdOfRoot(root, platform = process.platform) {
+  const key = pathKey(root, platform);
+  const hash = createHash("sha1").update(key).digest("hex").slice(0, 8);
+  const name = (posix.basename(key) || "root").replace(/[^\w.-]/g, "_");
   return `${name}-${hash}`;
+}
+function projectId(cwd) {
+  return projectIdOfRoot(projectRoot(cwd));
 }
 function ensureDir(dir) {
   if (!existsSync(dir))
@@ -267,7 +275,7 @@ function allNotes() {
     if (r.t === "del")
       byId.delete(r.id);
     else if (r.t === "note")
-      byId.set(r.id, r);
+      byId.set(r.id, r.root ? { ...r, project: projectIdOfRoot(r.root) } : r);
   }
   return [...byId.values()];
 }
@@ -549,11 +557,7 @@ function globMatch(pattern, text) {
   return new RegExp(`^${re}$`).test(text.toLowerCase());
 }
 function samePath(a, b) {
-  const norm = (p) => {
-    const s = resolve2(p).replace(/\\/g, "/").replace(/\/+$/, "");
-    return process.platform === "win32" ? s.toLowerCase() : s;
-  };
-  return norm(a) === norm(b);
+  return pathKey(a) === pathKey(b);
 }
 function readScopeFile(base) {
   const file = join2(base, "scope.json");
