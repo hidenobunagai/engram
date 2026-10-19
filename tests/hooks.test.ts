@@ -234,6 +234,61 @@ describe("review regressions", () => {
       /^engram: 1 team file\(s\) skipped/,
     );
   });
+
+  it("does not pair bq query failure with bq ls success", () => {
+    const { work } = sandbox();
+    bash(
+      work,
+      "s1",
+      "bq query 'select signup_dt from analytics.users'",
+      "Unrecognized name: signup_dt",
+    );
+    bash(work, "s1", "bq ls analytics");
+    expect(allNotes().filter((n) => n.kind === "fix").length).toBe(0);
+  });
+
+  it("does not pair unrelated python commands that only share the python command name", () => {
+    const { work } = sandbox();
+    bash(work, "s1", "python load.py", "FileNotFoundError: data.csv");
+    bash(work, "s1", "python report.py");
+    expect(allNotes().filter((n) => n.kind === "fix").length).toBe(0);
+  });
+
+  it("does not pair chained commands based on shared leading cd", () => {
+    const { work } = sandbox();
+    bash(
+      work,
+      "s1",
+      "cd ~/work/kpi && bq query 'select signup_dt from analytics.users'",
+      "Unrecognized name: signup_dt",
+    );
+    bash(work, "s1", "cd ~/work/kpi && bq ls analytics");
+    expect(allNotes().filter((n) => n.kind === "fix").length).toBe(0);
+  });
+
+  it("does not let an unrelated success prevent a real fix from pairing", () => {
+    const { work } = sandbox();
+    bash(
+      work,
+      "s1",
+      "bq query 'select signup_dt from analytics.users'",
+      "Unrecognized name: signup_dt",
+    );
+    bash(work, "s1", "bq ls analytics");
+    bash(work, "s1", "bq query 'select signup_date from analytics.users'");
+    const fixes = allNotes().filter((n) => n.kind === "fix");
+    expect(fixes.length).toBe(1);
+    expect(fixes[0].body).toMatch(/Worked:\n```\nbq query 'select signup_date/);
+  });
+
+  it("pairs valid fixes even when the command name differs", () => {
+    const { work } = sandbox();
+    bash(work, "s1", "python load.py", "ModuleNotFoundError: No module named 'requests'");
+    bash(work, "s1", "uv run python load.py");
+    const fixes = allNotes().filter((n) => n.kind === "fix");
+    expect(fixes.length).toBe(1);
+    expect(fixes[0].body).toMatch(/Worked:\n```\nuv run python load\.py/);
+  });
 });
 
 describe("file edits, history and dedupe", () => {

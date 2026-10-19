@@ -56,8 +56,8 @@ Root: `ENGRAM_HOME` or `~/.claude/engram-memory/`.
 ## Error → fix pairing
 
 File-writing tools are never paired. When a tool call succeeds, engram scans the last 15 records of the same session, newest first, for a
-record from the same tool that is similar to it. Similar means the same Bash command name, or a token
-Jaccard similarity of at least 0.3.
+record from the same tool that is similar to it. Similar means the same tool, with trivial leading
+segments (such as `cd X &&`) stripped for Bash, and a token Jaccard similarity of at least 0.3.
 
 - If the first similar record is a failure, engram saves a `fix` note. The note holds the failed input,
   the error and the working input. Its title comes from the error's headline line: the last line of a
@@ -134,4 +134,4 @@ day's records in order (last 200).
 - Search reads every record of the project on each prompt. With 20,000 observations it takes about
   0.25 s on a Raspberry Pi 5. Add a cached index if that grows.
 - Redaction is regex based. Unusual secret formats and personal data in SQL literals can pass through.
-- Fix pairing is heuristic and can pair unrelated calls that share a command name.
+- Fix pairing does not pair commands simply because they share a command name, but unrelated calls that share many tokens (such as `uv run python a.py` and `uv run python b.py`) can still pair.
