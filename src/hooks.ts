@@ -453,15 +453,20 @@ export function onSessionStart(input: HookInput): string {
   if (index) parts.push(index);
 
   const notes = allNotes();
-  const recent = notes
-    .filter((n) => n.project === project)
+  const own = notes.filter((n) => n.project === project);
+  const recent = own
     .sort((a, b) => b.ts - a.ts)
     .slice(0, 5)
     .map((n) => `- [${n.kind} ${n.id}] ${oneLine(n.title, 140)}`);
   if (recent.length)
     parts.push(["engram: latest notes saved in this project:", ...recent].join("\n"));
+  // Count this project separately: notes from other projects are searched at prompt time but
+  // saying "this project holds 7" while listing one reads as a bug.
+  const elsewhere = notes.length - own.length;
   parts.push(
-    `engram: personal memory holds ${notes.length} saved note(s); matching ones are added to prompts automatically. ` +
+    `engram: personal memory holds ${own.length} saved note(s) for this project` +
+      (elsewhere ? `, plus ${elsewhere} from other projects` : "") +
+      "; matching ones are added to prompts automatically. " +
       "Durable findings (data caveats, metric definitions, fixes) can be saved with /engram:save; past sessions are listed by /engram:history.",
   );
   return parts.join("\n\n");

@@ -15,7 +15,9 @@ If you want, you can promote a memory into a Markdown file that your team review
 - **Recall on every prompt**: matching notes, fixes, past errors and team items are added to the
   prompt (up to about 1.5 KB, and only when something matches).
 - **Session recap and history**: a new session starts with what the previous session in the same
-  repository was about and the latest notes saved there. `/engram:history` lists past sessions and
+  repository was about and the latest notes saved there. The note count names this project first and
+  adds how many belong to other projects, since those are still searchable at prompt time.
+  `/engram:history` lists past sessions and
   shows what happened in one session or on one day.
 - **Team sharing (optional, scoped)**: `/engram:share` publishes a note as Markdown into a shared
   folder (a network drive or a git clone), and teammates' sessions get an index of those files. Only

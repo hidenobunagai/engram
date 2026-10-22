@@ -352,6 +352,24 @@ describe("file edits, history and dedupe", () => {
       "] Soft deletes in dim_users",
     );
   });
+
+  it("counts this project's notes separately from other projects'", () => {
+    const { work } = sandbox();
+    saveNote({ project: projectId(work), kind: "caveat", title: "Own note", body: "b" });
+    saveNote({ project: "other-1", kind: "caveat", title: "Foreign one", body: "b" });
+    saveNote({ project: "other-2", kind: "caveat", title: "Foreign two", body: "b" });
+    const start = onSessionStart(ev(work, "s1", { source: "startup" }));
+    expect(start).toContain("holds 1 saved note(s) for this project, plus 2 from other projects");
+    expect(start).not.toContain("holds 3 saved note(s)");
+  });
+
+  it("stays quiet about other projects when every note belongs here", () => {
+    const { work } = sandbox();
+    saveNote({ project: projectId(work), kind: "caveat", title: "Own note", body: "b" });
+    const start = onSessionStart(ev(work, "s1", { source: "startup" }));
+    expect(start).toContain("holds 1 saved note(s) for this project;");
+    expect(start).not.toContain("from other projects");
+  });
 });
 
 describe("file capture review regressions", () => {
