@@ -27,7 +27,11 @@ If you want, you can promote a memory into a Markdown file that your team review
 ## Requirements
 
 - Claude Code
-- Node.js 18 or newer on `PATH` (`node -v`). If you installed Claude Code with npm, you already have it.
+- Node.js 18 or newer (`node -v`). If you installed Claude Code with npm, you already have it.
+  Hooks start through `hooks/run-hook.sh`, which finds Node even when the hook's `PATH` lacks it
+  (the macOS app runs hooks with `/usr/bin:/bin:...`): `ENGRAM_NODE` → `node` on `PATH` → newest
+  nvm install → Homebrew/system Node → bun. Set `ENGRAM_NODE` to a full path if none of those match.
+  Without any interpreter the hooks exit 127 with a message instead of silently doing nothing.
 
 ## Install
 
