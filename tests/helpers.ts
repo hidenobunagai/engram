@@ -16,3 +16,12 @@ export function joinTeam(cwd: string): void {
   setSelected(cwd, true);
   refreshSnapshot(0);
 }
+
+/**
+ * Waits until Date.now() moves on. Recaps are ordered by a millisecond timestamp, and two writes in
+ * the same millisecond tie, leaving "newest" to directory order (which differs between file systems).
+ */
+export function nextMillisecond(): void {
+  const now = Date.now();
+  while (Date.now() === now);
+}

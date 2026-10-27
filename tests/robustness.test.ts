@@ -25,7 +25,7 @@ import {
 } from "../src/memory";
 import { search, tokenize } from "../src/search";
 import { loadTeam, readSnapshot, refreshSnapshot, teamScope, writeTeamItem } from "../src/team";
-import { sandbox } from "./helpers";
+import { nextMillisecond, sandbox } from "./helpers";
 
 const ev = (work: string, session: string, extra: object) =>
   ({ session_id: session, cwd: work, ...extra }) as any;
@@ -136,6 +136,7 @@ describe("per-session recaps", () => {
     const { work } = sandbox();
     const project = projectId(work);
     updateRecap(project, "s1", { firstPrompt: "first session work" });
+    nextMillisecond();
     updateRecap(project, "s2", { firstPrompt: "second session work" });
     expect(readRecap(project, "s2")?.firstPrompt).toBe("first session work");
     expect(readRecap(project, "s1")?.firstPrompt).toBe("second session work");

@@ -97,7 +97,20 @@ function writeAtomic(file: string, text: string): void {
   mkdirSync(dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   writeFileSync(tmp, text, "utf-8");
-  renameSync(tmp, file);
+  // Windows refuses to replace a file another process (a hook reading config.json, antivirus) has
+  // open, with EPERM/EACCES/EBUSY. That clears in milliseconds, so retry briefly instead of failing.
+  const deadline = Date.now() + 1000;
+  for (;;) {
+    try {
+      renameSync(tmp, file);
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      const transient = code === "EPERM" || code === "EACCES" || code === "EBUSY";
+      if (process.platform !== "win32" || !transient || Date.now() > deadline) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }
 }
 
 /** Plugin hooks get CLAUDE_PLUGIN_ROOT; commands Claude runs through the Bash tool do not. */
