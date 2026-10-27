@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, Node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # The bundled CLI runs under Node in the hook path; bun only builds and runs the tests.
+        node: [18, 22]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      # Shared runners are slower than a laptop; the latency test's main check is relative.
+      ENGRAM_LATENCY_CEILING_MS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # dist/cli.mjs is committed; this is the version that builds it byte for byte.
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: node --version
+      # `test` builds dist/cli.mjs first, then runs unit tests and the Node end-to-end tests.
+      - run: bun run test
+      - run: bun run typecheck
+      - run: bun run format:check
+
+  dist:
+    name: dist/cli.mjs is fresh
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      # Plugin installs do not build, so a stale committed bundle ships stale code.
+      - name: Fail when the committed bundle differs from a fresh build
+        run: |
+          if ! git diff --exit-code -- dist/cli.mjs; then
+            echo "::error file=dist/cli.mjs::dist/cli.mjs is stale. Run 'bun run build' and commit the result."
+            exit 1
+          fi

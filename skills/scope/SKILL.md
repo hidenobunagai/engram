@@ -8,7 +8,7 @@ disable-model-invocation: true
 Run:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/dist/cli.mjs" scope $ARGUMENTS
+sh "${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh" scope $ARGUMENTS
 ```
 
 Report the result in one or two sentences.

@@ -6,11 +6,11 @@ disable-model-invocation: true
 ---
 
 1. Without an id, list shareable notes and ask the user which one to share:
-   `node "${CLAUDE_PLUGIN_ROOT}/dist/cli.mjs" share`
+   `sh "${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh" share`
 2. With an id, show the preview (nothing is written yet):
-   `node "${CLAUDE_PLUGIN_ROOT}/dist/cli.mjs" share <note-id>`
+   `sh "${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh" share <note-id>`
    Show the user the preview and point out anything that should not be shared (customer data, personal paths, credentials).
 3. Only after the user confirms, publish it:
-   `node "${CLAUDE_PLUGIN_ROOT}/dist/cli.mjs" share <note-id> --yes`
+   `sh "${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh" share <note-id> --yes`
 
 User input: $ARGUMENTS

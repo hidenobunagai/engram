@@ -9,11 +9,12 @@ Write a short title and a self-contained body (include the SQL or the rule, and 
 List the tables involved. Then run:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/dist/cli.mjs" save --kind <kind> --title "<title>" --tables "<t1,t2>" --tags "<tag1,tag2>" <<'ENGRAM_BODY'
+sh "${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh" save --kind <kind> --title "<title>" --tables "<t1,t2>" --tags "<tag1,tag2>" <<'ENGRAM_BODY'
 <body>
 ENGRAM_BODY
 ```
 
+Notes are recalled only in the project they were saved in. Add `--global` only when the finding holds in every project (for example a warehouse-wide metric definition), not for client- or repository-specific facts.
 Secrets and email addresses are redacted automatically, but do not put credentials or customer data in the body.
 Tell the user the saved id. They can share it with the team later with `/engram:share <id>`.
 

@@ -7,8 +7,9 @@ argument-hint: "<words>"
 Run:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/dist/cli.mjs" recall "$ARGUMENTS"
+sh "${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh" recall "$ARGUMENTS"
 ```
 
+This searches the current project's notes, global notes, its past sessions and team knowledge. If the user asks about another project, or nothing here matches, run it again with `--all` after the words to search every project's notes.
 Summarize the relevant results for the user. Team items list a file path; read that file when the details matter.
 Records can be outdated, so say when a result conflicts with what you observe now.

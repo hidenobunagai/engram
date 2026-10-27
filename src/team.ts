@@ -134,9 +134,13 @@ export function teamDirs(cwd: string): string[] {
   return [projectStore(cwd), sharedStore()].filter((d): d is string => !!d);
 }
 
-/** Nearest `.engram/` between cwd and the repository root. */
+/**
+ * Nearest `.engram/` between cwd and the repository root. A `.engram-ignore` at the root opts the
+ * repository out of its own `.engram/` too, which a clone would otherwise join automatically.
+ */
 export function projectStore(cwd: string): string | undefined {
   const root = projectRoot(cwd);
+  if (existsSync(join(root, ".engram-ignore"))) return undefined;
   let dir = resolve(cwd);
   for (;;) {
     if (existsSync(join(dir, ".engram"))) return join(dir, ".engram");
@@ -262,13 +266,11 @@ export function refreshSnapshot(maxAgeMs = 0): { snap: Snapshot | null; error?: 
   const prev = readSnapshot();
   if (prev && Date.now() - prev.at < maxAgeMs) return { snap: prev };
   const lock = `${snapshotFile()}.lock`;
-  try {
-    if (maxAgeMs > 0 && Date.now() - statSync(lock).mtimeMs < 120_000) return { snap: prev };
-  } catch {
-    // No lock: go ahead.
-  }
   mkdirSync(dataDir(), { recursive: true });
-  writeFileSync(lock, String(process.pid));
+  const owned = takeLock(lock);
+  // A background refresh holds the lock. A cached read waits for its result; a forced one (TTL 0,
+  // a command the user ran) reads the folder too, but leaves the other process's lock alone.
+  if (!owned && maxAgeMs > 0) return { snap: prev };
   try {
     if (!existsSync(dir)) return { snap: prev, error: `team folder not reachable: ${dir}` };
     const { scope, error } = readScopeFile(dir);
@@ -279,12 +281,33 @@ export function refreshSnapshot(maxAgeMs = 0): { snap: Snapshot | null; error?: 
   } catch (e) {
     return { snap: prev, error: (e as Error).message };
   } finally {
+    if (owned)
+      try {
+        unlinkSync(lock);
+      } catch {
+        // Already gone.
+      }
+  }
+}
+
+const LOCK_STALE_MS = 120_000;
+
+/** Creates `lock` exclusively. A lock older than LOCK_STALE_MS was left by a hung or crashed refresh. */
+function takeLock(lock: string): boolean {
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      unlinkSync(lock);
+      writeFileSync(lock, String(process.pid), { flag: "wx" });
+      return true;
     } catch {
-      // Already gone.
+      try {
+        if (Date.now() - statSync(lock).mtimeMs < LOCK_STALE_MS) return false;
+        unlinkSync(lock);
+      } catch {
+        // Gone meanwhile: try again.
+      }
     }
   }
+  return false;
 }
 
 export interface Scope {
@@ -422,6 +445,24 @@ export interface LoadResult {
   skipped: Array<{ path: string; reason: string }>;
 }
 
+/**
+ * A team file's text. Files are UTF-8, but Notepad on Japanese Windows still saves CP932
+ * (Shift_JIS): text that is not valid UTF-8 is decoded as Shift_JIS instead of being turned into
+ * replacement characters. Without an ICU that knows Shift_JIS, it falls back to lossy UTF-8.
+ */
+export function readText(path: string): string {
+  const raw = readFileSync(path);
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(raw);
+  } catch {
+    try {
+      return new TextDecoder("shift_jis").decode(raw);
+    } catch {
+      return raw.toString("utf-8");
+    }
+  }
+}
+
 /** Parses every item of one store. */
 function scanStore(base: string): { items: TeamItem[]; skipped: LoadResult["skipped"] } {
   const items: TeamItem[] = [];
@@ -433,7 +474,7 @@ function scanStore(base: string): { items: TeamItem[]; skipped: LoadResult["skip
       if (!f.endsWith(".md")) continue;
       const path = join(dir, f);
       try {
-        const { meta, body } = parseFrontmatter(readFileSync(path, "utf-8"));
+        const { meta, body } = parseFrontmatter(readText(path));
         const id = asText(meta.id);
         const title = asText(meta.title);
         if (!id || !title) {
@@ -513,10 +554,6 @@ export function serialize(item: Omit<TeamItem, "path">): string {
   return lines.join("\n");
 }
 
-/**
- * Writes a new team file. Never overwrites: an existing file with another id gets a suffix.
- * Returns the path. In a shared folder the file is visible to the team immediately.
- */
 export interface TeamWrite {
   path: string;
   text: string;
@@ -541,7 +578,13 @@ export function planTeamWrite(base: string, item: Omit<TeamItem, "path">): TeamW
   const text = serialize(clean);
   const files = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".md")) : [];
   for (const f of files) {
-    const content = readFileSync(join(dir, f), "utf-8");
+    let content: string;
+    try {
+      content = readText(join(dir, f));
+    } catch {
+      // Unreadable (or a file still being synced): it cannot hold this id for us to replace.
+      continue;
+    }
     if (parseFrontmatter(content).meta.id === clean.id)
       return { path: join(dir, f), text, existing: content };
   }
@@ -551,9 +594,27 @@ export function planTeamWrite(base: string, item: Omit<TeamItem, "path">): TeamW
   return { path, text };
 }
 
+/**
+ * Replacing the file that holds the item's id goes through a temp file and a rename, so a teammate
+ * never reads half of it. A new file is created exclusively: when a teammate published the same
+ * title in the meantime, the next free suffix is taken instead of overwriting theirs.
+ */
 export function writeTeamItem(base: string, item: Omit<TeamItem, "path">): string {
   const plan = planTeamWrite(base, item);
   mkdirSync(dirname(plan.path), { recursive: true });
-  writeFileSync(plan.path, plan.text, "utf-8");
-  return plan.path;
+  if (plan.existing !== undefined) {
+    writeAtomic(plan.path, plan.text);
+    return plan.path;
+  }
+  const stem = join(dirname(plan.path), slugify(sanitize(item.title)) || item.id);
+  let path = plan.path;
+  for (let n = 2; ; n++) {
+    try {
+      writeFileSync(path, plan.text, { encoding: "utf-8", flag: "wx" });
+      return path;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST" || n > 1000) throw e;
+      path = `${stem}-${n}.md`;
+    }
+  }
 }

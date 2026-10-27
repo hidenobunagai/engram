@@ -1,5 +1,7 @@
 #!/bin/sh
 # run-hook: start the bundled CLI from the PATH Claude Code gives hooks.
+# The /engram:* skills run through this script too, so slash commands work
+# wherever the hooks do.
 #
 # Hooks run under `sh -c` with whatever PATH the Claude Code process had, which on
 # macOS is often just /usr/bin:/bin:/usr/sbin:/sbin -- no nvm, no Homebrew, no bun.

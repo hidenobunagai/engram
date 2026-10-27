@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "fs";
+import { readdirSync, readFileSync } from "fs";
 import { join } from "path";
 
 const read = (p: string) => JSON.parse(readFileSync(join(import.meta.dirname, "..", p), "utf-8"));
@@ -27,6 +27,21 @@ describe("release metadata", () => {
     for (const command of commands) {
       expect(command).toContain("${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh");
       expect(command.trimStart().startsWith("node ")).toBe(false);
+    }
+  });
+});
+
+describe("skills", () => {
+  // The same PATH problem as the hooks: a slash command that runs bare `node` fails on machines
+  // where the hooks work, so every skill starts the CLI through the launcher too.
+  it("start the CLI through the interpreter-resolving launcher", () => {
+    const dir = join(import.meta.dirname, "..", "skills");
+    const skills = readdirSync(dir).map((s) => readFileSync(join(dir, s, "SKILL.md"), "utf-8"));
+    expect(skills.length).toBeGreaterThan(0);
+    for (const text of skills) {
+      expect(text).toContain('sh "${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh"');
+      expect(text).not.toMatch(/\bnode\s+["']?\$\{CLAUDE_PLUGIN_ROOT\}/);
+      expect(text).not.toContain("dist/cli.mjs");
     }
   });
 });

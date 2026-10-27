@@ -7,7 +7,7 @@ argument-hint: "[session-id | YYYY-MM-DD | --all]"
 Run:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/dist/cli.mjs" history $ARGUMENTS
+sh "${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh" history $ARGUMENTS
 ```
 
 With no argument it lists this project's sessions; `--all` lists every project. Pass a session id prefix or a date to see that timeline.

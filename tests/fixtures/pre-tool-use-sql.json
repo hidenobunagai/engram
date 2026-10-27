@@ -1,0 +1,13 @@
+{
+  "session_id": "11111111-1111-1111-1111-111111111111",
+  "transcript_path": "/tmp/transcript.jsonl",
+  "cwd": "/work/analytics",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "bq query --use_legacy_sql=false 'SELECT country, count(*) FROM analytics.dim_users WHERE active GROUP BY 1'",
+    "description": "Count active users by country"
+  },
+  "tool_use_id": "toolu_01PreSql000000000000000"
+}

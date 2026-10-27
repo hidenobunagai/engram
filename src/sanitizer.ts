@@ -28,6 +28,22 @@ function luhn(digits: string): boolean {
   return sum % 10 === 0;
 }
 
+/**
+ * The Japanese My Number check digit. A bare 12-digit run is far more often an id or a date
+ * in SQL than a personal number, so the rule that uses this also requires a My Number label.
+ */
+function myNumberOk(digits: string): boolean {
+  const d = digits.replace(/\D/g, "");
+  if (d.length !== 12) return false;
+  const n = [...d].map(Number);
+  let sum = 0;
+  for (let i = 1; i <= 11; i++) sum += n[11 - i] * (i <= 6 ? i + 1 : i - 5);
+  const check = 11 - (sum % 11);
+  return (check >= 10 ? 0 : check) === n[11];
+}
+
+const MY_NUMBER_LABEL = "(?:マイナンバー(?:カード)?|個人番号|my\\s*number)";
+
 const RULES: Array<[RegExp, string | ((m: string, ...g: string[]) => string)]> = [
   // PEM blocks (service account keys, Snowflake key-pair auth). Also matches JSON-escaped "\n".
   [
@@ -66,8 +82,14 @@ const RULES: Array<[RegExp, string | ((m: string, ...g: string[]) => string)]> =
   [/(\s(?:-u|--user)\s+[^\s:]+:)\S+/g, "$1[REDACTED_SECRET]"],
   [/(Authorization:\s*(?:Token|Key|ApiKey))\s+\S+/gi, "$1 [REDACTED_TOKEN]"],
   [/\b(Bearer|Basic)\s+[A-Za-z0-9_\-.~+/]{8,}=*/gi, "$1 [REDACTED_TOKEN]"],
-  // CLI flags: --password secret, --token=secret
-  [/(\s--?(?:password|passwd|pwd|token|secret)(?:=|\s+))(\S+)/gi, "$1[REDACTED_SECRET]"],
+  // CLI flags, matched on the secret-bearing part of the name: --password, --db-password=,
+  // --secret-key, --api-token, --passphrase, -pwd. The flag has to end in a secret word, so a
+  // path flag such as --key-file is left alone, and a number is never treated as a secret, so a
+  // count such as --max-tokens 1000 survives.
+  [
+    /(\s--?[\w-]*(?:password|passwd|passphrase|secret|token|key|pwd)(?:=|\s+))(?!-?\d+(?:\.\d+)?\b)(\S+)/gi,
+    "$1[REDACTED_SECRET]",
+  ],
   // Prose in prompts: "the password is X", "パスワードは X"
   [
     /(\b(?:password|passwd|secret|token|api ?key)\s+(?:is|was|=|:)\s+["']?)[^\s"']{6,}/gi,
@@ -89,6 +111,24 @@ const RULES: Array<[RegExp, string | ((m: string, ...g: string[]) => string)]> =
   [/\bAIza[A-Za-z0-9_-]{30,}/g, "[REDACTED_GOOGLE_KEY]"],
   [/\bdapi[a-f0-9]{32}\b/g, "[REDACTED_DATABRICKS_TOKEN]"],
   [/\bglpat-[A-Za-z0-9_-]{20,}/g, "[REDACTED_GITLAB_TOKEN]"],
+  // Google OAuth access tokens (ya29.) and OAuth client secrets (GOCSPX-).
+  [/\bya29\.[A-Za-z0-9_-]{20,}/g, "[REDACTED_GOOGLE_TOKEN]"],
+  [/\bGOCSPX-[A-Za-z0-9_-]{20,}/g, "[REDACTED_GOOGLE_SECRET]"],
+  // Hugging Face user access tokens.
+  [/\bhf_[A-Za-z0-9]{30,}/g, "[REDACTED_HF_TOKEN]"],
+  // npm tokens, and the .npmrc form `//registry/:_authToken=<value>` or `_authToken <value>`.
+  [/\bnpm_[A-Za-z0-9]{30,}/g, "[REDACTED_NPM_TOKEN]"],
+  [
+    /((?:\/\/[^\s]*|)_authToken["']?\s*[:=]\s*|\b_authToken\s+)["']?[A-Za-z0-9_-]{8,}["']?/gi,
+    "$1[REDACTED_SECRET]",
+  ],
+  // SendGrid: SG.<22 chars>.<43 chars>
+  [/\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b/g, "[REDACTED_SENDGRID_KEY]"],
+  // Cookie headers carry session ids, so the value goes. A cookie value always has a `name=`
+  // pair, which keeps prose such as "Cookie: see the docs" intact.
+  [/\b((?:Set-)?Cookie:\s*)(?=[^\n]*=)[^\n]+/gi, "$1[REDACTED_COOKIE]"],
+  // sshpass -p <password>
+  [/(\bsshpass\b[^\n]*?\s-p\s*)["']?[^\s"']+["']?/g, "$1[REDACTED_SECRET]"],
   // PII that commonly shows up in WHERE clauses and error messages
   [
     /(?<![A-Za-z0-9._%+\-\]])[A-Za-z0-9._%+-]+(?:@|%40)[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g,
@@ -101,6 +141,15 @@ const RULES: Array<[RegExp, string | ((m: string, ...g: string[]) => string)]> =
   [
     /(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)/g,
     (m) => (luhn(m.replace(/\D/g, "")) ? "[REDACTED_CARD]" : m),
+  ],
+  // My Number needs its label and a valid check digit. An unlabelled 12-digit run is left
+  // alone, because SQL is full of ids and dates that long.
+  [
+    new RegExp(
+      `(${MY_NUMBER_LABEL}\\s*(?:は|が|:|：|=|is)?\\s*)(\\d{4}[ -]?\\d{4}[ -]?\\d{4})`,
+      "gi",
+    ),
+    (m, label: string, digits: string) => (myNumberOk(digits) ? `${label}[REDACTED_MY_NUMBER]` : m),
   ],
 ];
 
