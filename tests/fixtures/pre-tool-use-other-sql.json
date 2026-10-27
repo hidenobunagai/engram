@@ -1,0 +1,12 @@
+{
+  "session_id": "11111111-1111-1111-1111-111111111111",
+  "transcript_path": "/tmp/transcript.jsonl",
+  "cwd": "/work/analytics",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "mcp__bigquery__execute_sql",
+  "tool_input": {
+    "sql": "SELECT order_id, amount FROM analytics.fct_orders LIMIT 10"
+  },
+  "tool_use_id": "toolu_01PreOther0000000000000"
+}

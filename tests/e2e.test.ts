@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { spawn, spawnSync } from "child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -38,6 +38,8 @@ describe("node dist/cli.mjs", () => {
       ["post-tool-use", "tool"],
       ["post-tool-use-failure", "tool"],
       ["stop", "stop"],
+      ["pre-tool-use-sql", "pre-tool"],
+      ["pre-tool-use-bash", "pre-tool"],
     ]) {
       const r = run(e, ["hook", event], fixture(name));
       expect(r.status).toBe(0);
@@ -52,6 +54,38 @@ describe("node dist/cli.mjs", () => {
     const r = run(env(), ["hook", "prompt"], "not json");
     expect(r.status).toBe(0);
     expect(r.stdout).toBe("");
+    const pre = run(env(), ["hook", "pre-tool"], "not json");
+    expect(pre.status).toBe(0);
+    expect(pre.stdout).toBe("");
+  });
+
+  it("warns about a caveat on the table a query is about to read", () => {
+    const e = env();
+    run(
+      e,
+      [
+        "save",
+        "--kind",
+        "caveat",
+        "--title",
+        "dim_users keeps soft-deleted rows",
+        "--tables",
+        "dim_users",
+      ],
+      "Filter deleted_at IS NULL.",
+    );
+    const hit = run(e, ["hook", "pre-tool"], fixture("pre-tool-use-sql"));
+    expect(hit.status).toBe(0);
+    const out = JSON.parse(hit.stdout).hookSpecificOutput;
+    expect(out.hookEventName).toBe("PreToolUse");
+    expect(out.permissionDecision).toBeUndefined();
+    expect(out.additionalContext).toContain("dim_users keeps soft-deleted rows");
+
+    for (const name of ["pre-tool-use-other-sql", "pre-tool-use-bash"]) {
+      const miss = run(e, ["hook", "pre-tool"], fixture(name));
+      expect(miss.status).toBe(0);
+      expect(miss.stdout).toBe("");
+    }
   });
 
   it("saves, recalls, and forgets a note", () => {
@@ -355,5 +389,368 @@ describe("shared folder review regressions", () => {
     const r = at(["share", id, "--yes"], y);
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("share it from that project");
+  });
+});
+
+describe("purge, resanitize and the capture opt-out", () => {
+  function setup() {
+    const e = env();
+    mkdirSync(join(e.ROOT!, ".git"), { recursive: true });
+    const at = (args: string[]) =>
+      spawnSync("node", [CLI, ...args], { env: e, cwd: e.ROOT, encoding: "utf-8" });
+    const hook = (payload: object) =>
+      spawnSync("node", [CLI, "hook", "tool"], {
+        env: e,
+        cwd: e.ROOT,
+        input: JSON.stringify({
+          session_id: "s1",
+          cwd: e.ROOT,
+          hook_event_name: "PostToolUse",
+          ...payload,
+        }),
+        encoding: "utf-8",
+      });
+    const obsLines = () => {
+      const dir = join(e.ENGRAM_HOME!, "obs");
+      if (!existsSync(dir)) return [] as string[];
+      return (readdirSync(dir, { recursive: true }) as string[])
+        .filter((f) => String(f).endsWith(".jsonl"))
+        .flatMap((f) =>
+          readFileSync(join(dir, String(f)), "utf-8")
+            .split("\n")
+            .filter(Boolean),
+        );
+    };
+    return { e, at, hook, obsLines };
+  }
+
+  it("purges matching observations and reports the count per store", () => {
+    const { at, hook, obsLines } = setup();
+    hook({ tool_name: "Bash", tool_input: { command: "bq query 'SELECT id FROM dim_users'" } });
+    hook({ tool_name: "Bash", tool_input: { command: "psql -c 'SELECT 1 FROM orders'" } });
+    at(["save", "--kind", "caveat", "--title", "dim_users soft deletes", "--body", "b"]);
+    expect(obsLines().length).toBe(2);
+
+    const r = at(["purge", "dim_users"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("observations: 1");
+    expect(r.stdout).toContain("notes: 1");
+    expect(obsLines().length).toBe(1);
+    expect(obsLines()[0]).not.toContain("dim_users");
+    expect(obsLines()[0]).toContain("orders");
+  });
+
+  it("purges a single observation by id", () => {
+    const { at, hook, obsLines } = setup();
+    hook({ tool_name: "Bash", tool_input: { command: "bq query 'SELECT id FROM dim_users'" } });
+    const id = JSON.parse(obsLines()[0]).id as string;
+    const r = at(["purge", id]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("observations: 1");
+    expect(obsLines().length).toBe(0);
+  });
+
+  it("reports no match without failing when the pattern is absent", () => {
+    const { at, hook } = setup();
+    hook({ tool_name: "Bash", tool_input: { command: "bq query 'SELECT id FROM dim_users'" } });
+    const r = at(["purge", "no_such_marker"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("observations: 0");
+  });
+
+  it("rejects an invalid regular expression", () => {
+    const { at } = setup();
+    const r = at(["purge", "a(b"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("Invalid regular expression");
+  });
+
+  it("resanitize applies current rules to records written before them", () => {
+    const { e, at } = setup();
+    const home = e.ENGRAM_HOME!;
+    mkdirSync(join(home, "obs", "proj"), { recursive: true });
+    mkdirSync(join(home, "recaps"), { recursive: true });
+    const jwtish = ["ya", "29.", "Zq9Lm2XwRt4Yw7Pb3Nc5Vd1"].join("");
+    writeFileSync(
+      join(home, "obs", "proj", "s1.jsonl"),
+      `${JSON.stringify({ t: "obs", id: "obs-a1", ts: 1, project: "proj", tool: "Bash", input: `curl ${jwtish}` })}\n`,
+    );
+    writeFileSync(
+      join(home, "notes.jsonl"),
+      `${JSON.stringify({ t: "note", id: "note-b2", ts: 1, project: "proj", kind: "fact", title: "t", body: `hf_${"Q".repeat(34)}` })}\n`,
+    );
+    writeFileSync(
+      join(home, "recaps", "proj.json"),
+      JSON.stringify({
+        session: "s1",
+        project: "proj",
+        ts: 1,
+        lastReply: "Sent Cookie: sid=Zq9Lm2Xwabcd; Path=/",
+      }),
+    );
+
+    const r = at(["resanitize"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("observations: 1");
+    expect(r.stdout).toContain("notes: 1");
+    expect(r.stdout).toContain("recaps: 1");
+    expect(readFileSync(join(home, "obs", "proj", "s1.jsonl"), "utf-8")).not.toContain(jwtish);
+    expect(readFileSync(join(home, "notes.jsonl"), "utf-8")).not.toContain("Q".repeat(34));
+    expect(readFileSync(join(home, "recaps", "proj.json"), "utf-8")).not.toContain("Zq9Lm2Xwabcd");
+  });
+
+  it("a .engram-ignore file stops capture and shows in status", () => {
+    const { e, at, hook, obsLines } = setup();
+    hook({ tool_name: "Bash", tool_input: { command: "bq query 'SELECT id FROM dim_users'" } });
+    expect(obsLines().length).toBe(1);
+    expect(at(["status"]).stdout).toContain("capture: on");
+
+    writeFileSync(join(e.ROOT!, ".engram-ignore"), "");
+    hook({ tool_name: "Bash", tool_input: { command: "bq query 'SELECT id FROM orders'" } });
+    expect(obsLines().length).toBe(1);
+    expect(obsLines().join("\n")).not.toContain("orders");
+    expect(at(["status"]).stdout).toContain(".engram-ignore");
+  });
+});
+
+describe("postings index under node", () => {
+  it("is built after the first prompt answers, extended by captures, and gives the same answer", () => {
+    const e = env();
+    mkdirSync(join(e.ROOT!, ".git"), { recursive: true });
+    const hook = (event: string, payload: object) =>
+      run(e, ["hook", event], JSON.stringify({ session_id: "s1", cwd: e.ROOT, ...payload }));
+    const tool = (command: string, error?: string) =>
+      hook("tool", {
+        hook_event_name: error ? "PostToolUseFailure" : "PostToolUse",
+        tool_name: "Bash",
+        tool_input: { command },
+        error,
+      });
+    tool(
+      "bq query 'SELECT country FROM analytics.dim_users'",
+      "Exit code 1\nAccess Denied: dim_users",
+    );
+    const ask = (session: string) =>
+      run(
+        e,
+        ["hook", "prompt"],
+        JSON.stringify({
+          session_id: session,
+          cwd: e.ROOT,
+          hook_event_name: "UserPromptSubmit",
+          prompt: "dim_users access denied again?",
+        }),
+      ).stdout;
+    const index = join(e.ENGRAM_HOME!, "index");
+    const first = ask("s2");
+    expect(first).toContain("Access Denied");
+    expect(readdirSync(index).length).toBe(1);
+    tool("python etl/load.py --since 2024-01-01");
+    const project = readdirSync(index)[0];
+    expect(existsSync(join(index, project, "delta.jsonl"))).toBe(true);
+    // A new session (the ledger would hide a repeat) reads the index and its delta.
+    expect(ask("s3")).toBe(first);
+  });
+});
+
+describe("status, history and usage", () => {
+  it("shows hook errors and warns when they are recent", () => {
+    const e = env();
+    expect(run(e, ["status"]).stdout).toContain("hook errors: none logged");
+    // A hook that cannot parse its input logs the failure and still exits 0.
+    expect(run(e, ["hook", "prompt"], "not json").status).toBe(0);
+    const out = run(e, ["status"]).stdout;
+    expect(out).toMatch(/hook errors: 1 logged, last \d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
+    expect(out).toContain("WARNING: 1 hook error(s) in the past 7 days");
+    expect(out).toContain("SyntaxError");
+  });
+
+  it("does not warn about errors older than a week", () => {
+    const e = env();
+    mkdirSync(e.ENGRAM_HOME!, { recursive: true });
+    writeFileSync(join(e.ENGRAM_HOME!, "error.log"), "2020-01-02T03:04:05.000Z Error: old\n");
+    const out = run(e, ["status"]).stdout;
+    expect(out).toContain("hook errors: 1 logged, last 2020-01-0");
+    expect(out).not.toContain("WARNING");
+  });
+
+  it("shows when this project last captured anything", () => {
+    const e = env();
+    expect(run(e, ["status"]).stdout).toContain("last capture in this project: never");
+    run(e, ["hook", "prompt"], fixture("user-prompt-submit"));
+    expect(run(e, ["status"]).stdout).toMatch(
+      /last capture in this project: \d{4}-\d{2}-\d{2} \d{2}:\d{2}/,
+    );
+  });
+
+  it("history --all <date> shows every project's records for that day", () => {
+    const e = env();
+    const other = join(e.ROOT!, "other");
+    mkdirSync(join(other, ".git"), { recursive: true });
+    mkdirSync(join(e.ROOT!, ".git"), { recursive: true });
+    const prompt = (cwd: string, text: string) =>
+      run(
+        e,
+        ["hook", "prompt"],
+        JSON.stringify({
+          session_id: "s1",
+          cwd,
+          hook_event_name: "UserPromptSubmit",
+          prompt: text,
+        }),
+      );
+    prompt(e.ROOT!, "revenue by month here");
+    prompt(other, "churn in the other repo");
+    const d = new Date();
+    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const mine = run(e, ["history", today]).stdout;
+    expect(mine).toContain("revenue by month here");
+    expect(mine).not.toContain("churn in the other repo");
+    const all = run(e, ["history", today, "--all"]).stdout;
+    expect(all).toContain("in all projects");
+    expect(all).toContain("revenue by month here");
+    expect(all).toContain("churn in the other repo");
+  });
+
+  it("reports notes by source and lifecycle state", () => {
+    const e = env();
+    run(e, ["save", "--kind", "caveat", "--title", "c1", "--body", "b"]);
+    run(e, ["save", "--kind", "metric", "--title", "m1", "--body", "b", "--global"]);
+    const out = run(e, ["status"]).stdout;
+    expect(out).toContain("notes by source: auto 0, curated 2, shared with the team 0; global 1");
+    expect(out).toContain("lifecycle: active 2, demoted 0");
+  });
+
+  it("save --global and recall --all cross project lines on purpose", () => {
+    const e = env();
+    const other = join(e.ROOT!, "other");
+    mkdirSync(join(other, ".git"), { recursive: true });
+    mkdirSync(join(e.ROOT!, ".git"), { recursive: true });
+    const at = (cwd: string, args: string[]) =>
+      spawnSync("node", [CLI, ...args], { env: e, cwd, encoding: "utf-8" });
+    expect(
+      at(other, ["save", "--kind", "caveat", "--title", "orders local quirk"]).stdout,
+    ).not.toContain("global");
+    expect(
+      at(other, ["save", "--kind", "metric", "--title", "orders revenue rule", "--global"]).stdout,
+    ).toContain("(global: recalled in every project)");
+    const here = at(e.ROOT!, ["recall", "orders"]).stdout;
+    expect(here).toContain("orders revenue rule");
+    expect(here).not.toContain("orders local quirk");
+    expect(at(e.ROOT!, ["recall", "orders", "--all"]).stdout).toContain("orders local quirk");
+  });
+
+  /** A failed query on dim_users, its fix, another run, a caveat and an unrelated global metric. */
+  function analystStore() {
+    const e = env();
+    mkdirSync(join(e.ROOT!, ".git"), { recursive: true });
+    const tool = (command: string, error?: string) =>
+      run(
+        e,
+        ["hook", "tool"],
+        JSON.stringify({
+          session_id: "s1",
+          cwd: e.ROOT,
+          hook_event_name: error ? "PostToolUseFailure" : "PostToolUse",
+          tool_name: "Bash",
+          tool_input: { command },
+          error,
+        }),
+      );
+    tool(
+      "bq query 'SELECT signup_dt FROM analytics.dim_users'",
+      "Exit code 1\nUnrecognized name: signup_dt",
+    );
+    tool("bq query 'SELECT signup_date FROM analytics.dim_users'");
+    tool("bq query 'SELECT country FROM analytics.dim_users, analytics.fct_orders'");
+    run(e, [
+      "save",
+      "--kind",
+      "caveat",
+      "--title",
+      "dim_users keeps soft-deleted accounts",
+      "--tables",
+      "analytics.dim_users",
+      "--body",
+      "Filter deleted_at IS NULL.",
+    ]);
+    run(e, [
+      "save",
+      "--kind",
+      "metric",
+      "--title",
+      "Active user definition",
+      "--tables",
+      "fct_sessions",
+      "--global",
+    ]);
+    return e;
+  }
+
+  it("table prints the card for one table", () => {
+    const e = analystStore();
+    const out = run(e, ["table", "dim_users"]).stdout;
+    const lines = out.trimEnd().split("\n");
+    expect(lines[0]).toBe("engram table: dim_users");
+    expect(lines[1]).toMatch(
+      /^- last touched: \d{4}-\d{2}-\d{2} \d{2}:\d{2} \(3 recorded run\(s\) in this project, 1 failed\)$/,
+    );
+    expect(out).toContain("Caveats and notes:\n- [caveat ");
+    expect(out).toContain("dim_users keeps soft-deleted accounts: Filter deleted_at IS NULL.");
+    expect(out).toContain("Most common errors:\n- 1× Unrecognized name: signup_dt (last ");
+    expect(out).toContain("Fixes that resolved errors:\n- [fix ");
+    expect(out).toContain("worked: bq query 'SELECT signup_date FROM analytics.dim_users'");
+    expect(out).not.toContain("Active user definition");
+    // A qualified name finds the same card.
+    expect(run(e, ["table", "analytics.dim_users"]).stdout).toContain(
+      "1× Unrecognized name: signup_dt",
+    );
+  });
+
+  it("table respects project scoping and says when it knows nothing", () => {
+    const e = analystStore();
+    const other = join(e.ROOT!, "other");
+    mkdirSync(join(other, ".git"), { recursive: true });
+    const there = spawnSync("node", [CLI, "table", "dim_users"], {
+      env: e,
+      cwd: other,
+      encoding: "utf-8",
+    });
+    expect(there.stdout).toContain("engram knows nothing about dim_users in this project");
+    // A global note follows the user everywhere.
+    const metric = spawnSync("node", [CLI, "table", "fct_sessions"], {
+      env: e,
+      cwd: other,
+      encoding: "utf-8",
+    });
+    expect(metric.stdout).toContain("Active user definition");
+    expect(run(e, ["table"]).status).toBe(1);
+  });
+
+  it("stats reports disk use, records by kind and source, lifecycle and top tables", () => {
+    const e = analystStore();
+    const out = run(e, ["stats"]).stdout;
+    expect(out).toMatch(/^engram stats\n- data dir: .+ \(\d+(\.\d)? (B|KB|MB) in \d+ files\)/);
+    expect(out).toMatch(/ {2}- observations: \d+(\.\d)? (B|KB) in \d+ files/);
+    expect(out).toContain("notes.jsonl ");
+    expect(out).toContain(
+      "- observations: 3 in this project (1 errors, 0 prompts); 3 across 1 project(s)",
+    );
+    expect(out).toContain("- notes: 3 (caveat 1, metric 1, fix 1); 3 recalled in this project");
+    expect(out).toContain("- notes by source: auto 1, curated 2, shared with the team 0; global 1");
+    expect(out).toContain("- lifecycle: active 3, demoted 0");
+    expect(out).toContain(
+      "- top tables in this project (by recorded runs):\n  - analytics.dim_users: 3\n  - analytics.fct_orders: 1",
+    );
+  });
+
+  it("lists every implemented command and hook event in USAGE", () => {
+    const usage = run(env(), []).stdout;
+    const source = readFileSync(join(import.meta.dirname, "..", "src", "cli.ts"), "utf-8");
+    const commands = [...source.matchAll(/cmd === "([\w-]+)"/g)].map((m) => m[1]);
+    const events = [...source.matchAll(/event === "([\w-]+)"/g)].map((m) => m[1]);
+    expect(commands.length).toBeGreaterThan(5);
+    for (const c of commands) expect(usage).toMatch(new RegExp(`^  ${c}\\b`, "m"));
+    for (const ev of events) expect(usage).toMatch(new RegExp(`hook <[^>]*\\b${ev}\\b`));
   });
 });

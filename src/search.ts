@@ -1,6 +1,6 @@
 /**
- * Small in-process BM25 over notes, observations and team knowledge.
- * ponytail: rebuilt on every call; fine for tens of thousands of records, add a cached index if it gets slow.
+ * Small in-process BM25 over notes, observations and team knowledge. Observations can come from the
+ * postings index (postings.ts) instead of a full scan; both feed the same rank().
  */
 
 export interface Doc {
@@ -16,6 +16,8 @@ export interface Doc {
   display?: string;
   /** Docs sharing a group collapse to the best hit (e.g. all edits of one file). */
   group?: string;
+  /** Tables a note or team item is about; a prompt naming one surfaces it without BM25. */
+  tables?: string[];
   ref?: string;
 }
 
@@ -44,11 +46,19 @@ const HAS_HIRAGANA = /[\u3040-\u309f]/;
 const WORD = /[a-z0-9_$][a-z0-9_$.]*/g;
 
 /**
+ * The one text form every token comes from: NFKC folds full-width ASCII typed through a Japanese IME
+ * (ｄｉｍ＿ｕｓｅｒｓ) and half-width katakana into the forms stored text uses, then case is dropped.
+ */
+export function normalize(text: string): string {
+  return text.normalize("NFKC").toLowerCase();
+}
+
+/**
  * ASCII identifiers stay whole (dim_users, schema.table) and also contribute their `.`/`_` parts
  * (users, mau); CJK runs become character bigrams so Japanese works without a dictionary.
  */
 export function tokenize(text: string): string[] {
-  const lower = text.toLowerCase();
+  const lower = normalize(text);
   const out: string[] = [];
   for (const m of lower.match(WORD) || []) {
     const w = m.replace(/\.+$/, "");
@@ -82,54 +92,83 @@ export function tokenize(text: string): string[] {
 const K1 = 1.2;
 const B = 0.75;
 
+/** A doc that may match, with the frequency of each query term (in query order) and its token count. */
+export interface Candidate {
+  doc: Doc;
+  tf: number[];
+  len: number;
+}
+
+/** The text a doc is searched by: the title counts twice. */
+export const searchText = (d: Doc) => `${d.title} ${d.title} ${d.text}`;
+
+/** Distinct query terms, in query order. */
+export const queryTerms = (query: string) => [...new Set(tokenize(query))];
+
+/**
+ * A token can only occur in a doc whose normalized text contains it, so a cheap substring pass skips
+ * tokenizing most docs. The postings index reproduces this set exactly (see postings.ts), because
+ * document lengths are averaged over these candidates.
+ */
+export function candidates(docs: Doc[], qTerms: string[]): Candidate[] {
+  const out: Candidate[] = [];
+  for (const doc of docs) {
+    const text = searchText(doc);
+    const lower = normalize(text);
+    if (!qTerms.some((q) => lower.includes(q))) continue;
+    const tokens = tokenize(text);
+    const counts = new Map<string, number>();
+    for (const t of tokens) counts.set(t, (counts.get(t) || 0) + 1);
+    out.push({ doc, tf: qTerms.map((q) => counts.get(q) || 0), len: tokens.length });
+  }
+  return out;
+}
+
 /**
  * Returns docs whose matched query terms carry enough IDF, ranked by weighted BM25.
  * The floor (minIdf, relaxed to half the IDF of query terms present in the corpus) keeps a single
  * common word from pulling in unrelated memories.
  */
 export function search(docs: Doc[], query: string, limit = 5, minIdf = 3): Hit[] {
-  const qTerms = [...new Set(tokenize(query))];
+  const qTerms = queryTerms(query);
   if (!qTerms.length || !docs.length) return [];
+  return rank(docs.length, qTerms, candidates(docs, qTerms), limit, minIdf);
+}
 
-  // A token can only occur in a doc whose lowercased text contains it, so a cheap substring
-  // pass skips tokenizing most docs. Document lengths are averaged over candidates only.
-  const texts = docs.map((d) => `${d.title} ${d.title} ${d.text}`);
-  const cand = docs
-    .map((_, i) => i)
-    .filter((i) => {
-      const lower = texts[i].toLowerCase();
-      return qTerms.some((q) => lower.includes(q));
-    });
-  const tfs = new Map<number, Map<string, number>>();
-  for (const i of cand) {
-    const tf = new Map<string, number>();
-    for (const t of tokenize(texts[i])) tf.set(t, (tf.get(t) || 0) + 1);
-    tfs.set(i, tf);
-  }
-  const lens = new Map(cand.map((i) => [i, [...tfs.get(i)!.values()].reduce((a, b) => a + b, 0)]));
-  const avgLen = [...lens.values()].reduce((a, b) => a + b, 0) / (cand.length || 1) || 1;
+/**
+ * BM25 over `cand` in a corpus of `total` docs. Ties keep the order of `cand`, so callers pass
+ * candidates in corpus order.
+ */
+export function rank(
+  total: number,
+  qTerms: string[],
+  cand: Candidate[],
+  limit: number,
+  minIdf: number,
+): Hit[] {
+  if (!qTerms.length || !total) return [];
+  const avgLen = cand.reduce((a, c) => a + c.len, 0) / (cand.length || 1) || 1;
 
-  const idf = new Map<string, number>();
+  const idf: number[] = [];
   let presentIdf = 0;
-  for (const q of qTerms) {
-    const n = cand.filter((i) => tfs.get(i)!.has(q)).length;
-    const w = Math.log(1 + (docs.length - n + 0.5) / (n + 0.5));
-    idf.set(q, w);
+  for (let j = 0; j < qTerms.length; j++) {
+    const n = cand.filter((c) => c.tf[j] > 0).length;
+    const w = Math.log(1 + (total - n + 0.5) / (n + 0.5));
+    idf.push(w);
     if (n) presentIdf += w;
   }
   const floor = Math.min(minIdf, presentIdf / 2);
 
   const hits: Hit[] = [];
-  for (const i of cand) {
-    const doc = docs[i];
+  for (const { doc, tf, len } of cand) {
     let score = 0;
     let matchedIdf = 0;
-    for (const q of qTerms) {
-      const f = tfs.get(i)!.get(q);
+    for (let j = 0; j < qTerms.length; j++) {
+      const f = tf[j];
       if (!f) continue;
-      const w = idf.get(q)!;
+      const w = idf[j];
       matchedIdf += w;
-      score += (w * f * (K1 + 1)) / (f + K1 * (1 - B + (B * lens.get(i)!) / avgLen));
+      score += (w * f * (K1 + 1)) / (f + K1 * (1 - B + (B * len) / avgLen));
     }
     if (matchedIdf > 0 && matchedIdf >= floor) hits.push({ doc, score: score * doc.weight });
   }
