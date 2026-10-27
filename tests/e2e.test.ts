@@ -1,6 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import { spawn, spawnSync } from "child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -10,7 +18,9 @@ const fixture = (name: string) =>
   readFileSync(join(import.meta.dirname, "fixtures", `${name}.json`), "utf-8");
 
 function env() {
-  const root = mkdtempSync(join(tmpdir(), "engram-e2e-"));
+  // The child's process.cwd() is the physical path (macOS tmpdir is /var -> /private/var, Windows
+  // may report 8.3 short names), so payload cwds and HOME must use it too to name the same project.
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "engram-e2e-")));
   return {
     ...process.env,
     ENGRAM_HOME: join(root, "home"),
@@ -337,17 +347,22 @@ describe("shared folder review regressions", () => {
       mkdirSync(join(d, ".git"), { recursive: true });
       return d;
     });
-    await Promise.all(
+    // A child that fails would lose its entry; its stderr says why, so it is part of the check.
+    const failed = await Promise.all(
       dirs.map(
         (d) =>
-          new Promise<void>((done) =>
-            spawn("node", [CLI, "scope", "on"], { env: { ...e, ENGRAM_TEAM_DIR: "" }, cwd: d }).on(
-              "close",
-              () => done(),
-            ),
-          ),
+          new Promise<string>((done) => {
+            const child = spawn("node", [CLI, "scope", "on"], {
+              env: { ...e, ENGRAM_TEAM_DIR: "" },
+              cwd: d,
+            });
+            let stderr = "";
+            child.stderr.on("data", (chunk) => (stderr += chunk));
+            child.on("close", (code) => done(code === 0 ? "" : `exit ${code}: ${stderr.trim()}`));
+          }),
       ),
     );
+    expect(failed.filter(Boolean)).toEqual([]);
     const cfg = JSON.parse(readFileSync(join(e.ENGRAM_HOME!, "config.json"), "utf-8"));
     expect(cfg.projects.length).toBe(12);
   }, 30_000);

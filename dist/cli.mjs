@@ -1261,7 +1261,19 @@ function writeAtomic2(file, text) {
   mkdirSync3(dirname2(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   writeFileSync3(tmp, text, "utf-8");
-  renameSync3(tmp, file);
+  const deadline = Date.now() + 1000;
+  for (;; ) {
+    try {
+      renameSync3(tmp, file);
+      return;
+    } catch (e) {
+      const code = e.code;
+      const transient = code === "EPERM" || code === "EACCES" || code === "EBUSY";
+      if (process.platform !== "win32" || !transient || Date.now() > deadline)
+        throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }
 }
 var inPluginHook = () => !!process.env.CLAUDE_PLUGIN_ROOT;
 function persistPluginOption() {

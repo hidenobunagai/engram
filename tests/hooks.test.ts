@@ -22,7 +22,7 @@ import {
   readRecap,
   saveNote,
 } from "../src/memory";
-import { joinTeam, sandbox } from "./helpers";
+import { joinTeam, nextMillisecond, sandbox } from "./helpers";
 
 const ev = (work: string, session: string, extra: object) =>
   ({ session_id: session, cwd: work, ...extra }) as any;
@@ -206,7 +206,9 @@ describe("review regressions", () => {
   it("keeps each session's first prompt when sessions interleave", () => {
     const { work } = sandbox();
     onPrompt(ev(work, "A", { prompt: "first A: monthly churn by plan" }));
+    nextMillisecond();
     onPrompt(ev(work, "B", { prompt: "B: unrelated refactor of auth" }));
+    nextMillisecond();
     onPrompt(ev(work, "A", { prompt: "A2: now add the retention cohort" }));
     expect(onSessionStart(ev(work, "C", { source: "startup" }))).toContain(
       "started with: first A: monthly churn by plan",
@@ -351,11 +353,14 @@ describe("file edits, history and dedupe", () => {
       projectObservations(projectId(work))
         .map((o) => o.input)
         .sort(),
-    ).toEqual([
-      "edit /work/analytics/q.sql\nselect user_id from dim_users",
-      `write ${join(work, "out.csv")}`,
-      "write /work/analytics/q.sql\nselect 1 from dim_users\n",
-    ]);
+    ).toEqual(
+      // Sorted too: a Windows temp path (C:\...) sorts after /work, a POSIX one (/tmp) before it.
+      [
+        "edit /work/analytics/q.sql\nselect user_id from dim_users",
+        `write ${join(work, "out.csv")}`,
+        "write /work/analytics/q.sql\nselect 1 from dim_users\n",
+      ].sort(),
+    );
   });
 
   it("does not pair failed edits as fixes", () => {
