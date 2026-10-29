@@ -1,6 +1,6 @@
 {
   "name": "engram",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Automatic working memory for data analysts in Claude Code, with optional team sharing",
   "author": {
     "name": "hidenobunagai",
