@@ -140,14 +140,14 @@ export function clipMiddle(text: string, max: number): string {
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");
-/** Local-time "YYYY-MM-DD" and "YYYY-MM-DD HH:MM", so dates match what the analyst sees on their clock. */
-export function localDay(ts: number): string {
+/** UTC "YYYY-MM-DD" and "YYYY-MM-DD HH:MM": the day boundary is UTC everywhere, so dates agree across machines and timezones. */
+export function utcDay(ts: number): string {
   const d = new Date(ts);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
-export function localTime(ts: number): string {
+export function utcTime(ts: number): string {
   const d = new Date(ts);
-  return `${localDay(ts)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${utcDay(ts)} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
 }
 
 export function newId(prefix: string): string {

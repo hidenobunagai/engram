@@ -189,13 +189,13 @@ function clipMiddle(text, max) {
 ${text.slice(text.length - (max - head))}`;
 }
 var pad = (n) => String(n).padStart(2, "0");
-function localDay(ts) {
+function utcDay(ts) {
   const d = new Date(ts);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
-function localTime(ts) {
+function utcTime(ts) {
   const d = new Date(ts);
-  return `${localDay(ts)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${utcDay(ts)} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
 }
 function newId(prefix) {
   return `${prefix}-${randomUUID().slice(0, 8)}`;
@@ -2196,8 +2196,8 @@ function formatHit(h) {
   if (d.source === "team")
     return `- [team ${d.kind}] ${d.title}: ${oneLine(text, 160)} (${d.ref})`;
   if (d.source === "note")
-    return `- [${d.kind} ${localDay(d.ts)} ${d.id}] ${d.title}: ${oneLine(text, 220)}`;
-  return `- [past ${d.kind} ${localDay(d.ts)}] ${oneLine(text, 240)}`;
+    return `- [${d.kind} ${utcDay(d.ts)} ${d.id}] ${d.title}: ${oneLine(text, 220)}`;
+  return `- [past ${d.kind} ${utcDay(d.ts)}] ${oneLine(text, 240)}`;
 }
 var lineKey = (d) => d.group ?? d.display ?? d.text;
 function uniqueHits(hits, max) {
@@ -2329,7 +2329,7 @@ function onPreToolUse(input) {
       body: n.body,
       own: n.project === project,
       ts: n.ts,
-      line: `- [${n.kind} ${localDay(n.ts)} ${n.id}] ${n.title}: ${oneLine(n.kind === "fix" ? fixDisplay(n.body) : n.body, 220)}`
+      line: `- [${n.kind} ${utcDay(n.ts)} ${n.id}] ${n.title}: ${oneLine(n.kind === "fix" ? fixDisplay(n.body) : n.body, 220)}`
     });
   const picked = [...found.values()].sort((a, b) => Number(!a.bad.length) - Number(!b.bad.length) || kindRank(a.kind) - kindRank(b.kind) || Number(b.own) - Number(a.own) || b.ts - a.ts).slice(0, GUARD_ITEMS);
   const context = fitLines(`engram: known issues with ${tables.join(", ")} from memory, before this query runs (may be outdated; verify):`, picked.map((w) => w.line), GUARD_BUDGET);
@@ -2355,7 +2355,7 @@ function compactRecall(project, session, fixes) {
   const errors = sessionObservations(project, session).filter((o) => o.error && !told.has(o.id)).slice(-COMPACT_ERRORS);
   return fitLines("engram: found earlier in this session, before the context was compacted:", [
     ...fixes.map((n) => `- [fix ${n.id}] ${oneLine(n.title, 140)}: ${oneLine(fixDisplay(n.body), 220)}`),
-    ...errors.map((o) => `- [error ${localDay(o.ts)}] ${oneLine(errorHeadline(o.error), 160)} — from: ${oneLine(o.input, 120)}`)
+    ...errors.map((o) => `- [error ${utcDay(o.ts)}] ${oneLine(errorHeadline(o.error), 160)} — from: ${oneLine(o.input, 120)}`)
   ], COMPACT_BUDGET);
 }
 function teamIndex(items, skipped, budget) {
@@ -2401,7 +2401,7 @@ function onSessionStart(input) {
   }
   const recap = input.source === "compact" ? null : readRecap(project, input.session_id);
   if (recap) {
-    const lines = [`engram: previous session in this project (${localDay(recap.ts)}):`];
+    const lines = [`engram: previous session in this project (${utcDay(recap.ts)}):`];
     if (recap.firstPrompt)
       lines.push(`- started with: ${oneLine(recap.firstPrompt, 200)}`);
     if (recap.lastPrompt && recap.lastPrompt !== recap.firstPrompt)
@@ -2555,7 +2555,7 @@ function share(id, opt, yes, update = false) {
       return "No shareable notes. Notes saved inside the team scope appear here.";
     return [
       "Shareable notes (saved inside the team scope, not shared yet):",
-      ...candidates.map((n) => `- ${n.id} [${n.kind} ${localDay(n.ts)}] ${n.title}`),
+      ...candidates.map((n) => `- ${n.id} [${n.kind} ${utcDay(n.ts)}] ${n.title}`),
       "Share one with: engram share <note-id>"
     ].join(`
 `);
@@ -2610,7 +2610,7 @@ function history(pos, opt) {
       return "No recorded sessions.";
     return [
       `Sessions${all ? "" : ` in ${project}`} (newest first):`,
-      ...sessions.map((s) => `- ${s.session.slice(0, 8)} ${localTime(s.start)} → ${localTime(s.end).slice(11)} ` + `${s.records} records${s.errors ? `, ${s.errors} errors` : ""}${all ? ` [${s.project}]` : ""}` + (s.firstPrompt ? ` — ${s.firstPrompt.replace(/\s+/g, " ").slice(0, 100)}` : "")),
+      ...sessions.map((s) => `- ${s.session.slice(0, 8)} ${utcTime(s.start)} → ${utcTime(s.end).slice(11)} ` + `${s.records} records${s.errors ? `, ${s.errors} errors` : ""}${all ? ` [${s.project}]` : ""}` + (s.firstPrompt ? ` — ${s.firstPrompt.replace(/\s+/g, " ").slice(0, 100)}` : "")),
       "Show one with: engram history <session-id or YYYY-MM-DD>"
     ].join(`
 `);
@@ -2618,7 +2618,7 @@ function history(pos, opt) {
   const byDay = /^\d{4}-\d{2}-\d{2}$/.test(target);
   const all = pos.includes("--all");
   const where = all ? "all projects" : project;
-  const recs = (all ? allObservations() : projectObservations(project)).filter((o) => byDay ? localDay(o.ts) === target : o.session.startsWith(target)).sort((a, b) => a.ts - b.ts).slice(-200);
+  const recs = (all ? allObservations() : projectObservations(project)).filter((o) => byDay ? utcDay(o.ts) === target : o.session.startsWith(target)).sort((a, b) => a.ts - b.ts).slice(-200);
   if (!recs.length)
     return `Nothing recorded for "${target}" in ${where}.`;
   const ids = [...new Set(recs.map((o) => o.session))];
@@ -2634,7 +2634,7 @@ function history(pos, opt) {
       const what = o.input.replace(/\s+/g, " ").slice(0, 160);
       const err = o.error ? ` ✗ ${o.error.replace(/\s+/g, " ").slice(0, 120)}` : "";
       const tag = all ? ` [${o.project}]` : "";
-      return `- ${localTime(o.ts).slice(11)} ${byDay ? `${o.session.slice(0, 8)} ` : ""}${o.tool}${tag}: ${what}${err}`;
+      return `- ${utcTime(o.ts).slice(11)} ${byDay ? `${o.session.slice(0, 8)} ` : ""}${o.tool}${tag}: ${what}${err}`;
     })
   ].join(`
 `);
@@ -2667,12 +2667,12 @@ function status() {
     `- saved notes: ${notes.length}${byKind.length ? ` (${byKind.map(([k, c]) => `${k} ${c}`).join(", ")})` : ""}`,
     ...lifecycleLines(notes, new Set(items.map((i) => i.id))),
     `- captured observations for this project: ${obs.length} (errors: ${obs.filter((o) => o.error).length})`,
-    `- last capture in this project: ${obs.length ? localTime(obs.reduce((a, o) => Math.max(a, o.ts), 0)) : "never"}`,
+    `- last capture in this project: ${obs.length ? utcTime(obs.reduce((a, o) => Math.max(a, o.ts), 0)) : "never"}`,
     ...hookHealth(),
     `- capture: ${captureIgnored(cwd) ? "off (.engram-ignore at the project root)" : process.env.ENGRAM_DISABLE_CAPTURE === "1" ? "off (ENGRAM_DISABLE_CAPTURE)" : "on"}`,
     `- team scope: ${teamScope(cwd).inScope ? "in scope" : "out of scope"} (${teamScope(cwd).reason})`,
     `- team folder: ${sharedStore() || "none"}${error ? ` (${error})` : ""}`,
-    `- team snapshot: ${snap ? `${snap.items.length} items, ${localTime(snap.at)}` : "none"}`,
+    `- team snapshot: ${snap ? `${snap.items.length} items, ${utcTime(snap.at)}` : "none"}`,
     `- team stores: ${teamDirs(cwd).join(", ") || "none"}`,
     `- team items loaded: ${items.length}`
   ];
@@ -2713,23 +2713,23 @@ function table(name) {
     return `engram knows nothing about ${name} in this project. Search wider with: engram recall ${name} --all`;
   const oneLine = (s, max) => clip(s.replace(/\s+/g, " ").trim(), max);
   const out = [`engram table: ${name}`];
-  out.push(`- last touched: ${touched ? localTime(touched) : "never"} ` + `(${runs.length} recorded run(s) in this project, ${runs.filter((o) => o.error).length} failed)`);
+  out.push(`- last touched: ${touched ? utcTime(touched) : "never"} ` + `(${runs.length} recorded run(s) in this project, ${runs.filter((o) => o.error).length} failed)`);
   if (team.length || others.length) {
     out.push("Caveats and notes:");
     for (const t of team.slice(0, TABLE_NOTES))
       out.push(`- [team ${t.kind}] ${t.title}: ${oneLine(summaryOf(t), 160)} (${t.path})`);
     for (const n of others.sort((a, b) => kindOrder(a.kind) - kindOrder(b.kind) || b.ts - a.ts).slice(0, Math.max(0, TABLE_NOTES - team.length)))
-      out.push(`- [${n.kind} ${localDay(n.ts)} ${n.id}] ${n.title}: ${oneLine(n.body, 160)}`);
+      out.push(`- [${n.kind} ${utcDay(n.ts)} ${n.id}] ${n.title}: ${oneLine(n.body, 160)}`);
   }
   if (errors.size) {
     out.push("Most common errors:");
     for (const [line, e] of [...errors].sort((a, b) => b[1].count - a[1].count || b[1].last - a[1].last).slice(0, TABLE_ERRORS))
-      out.push(`- ${e.count}× ${line} (last ${localDay(e.last)})`);
+      out.push(`- ${e.count}× ${line} (last ${utcDay(e.last)})`);
   }
   if (fixes.length) {
     out.push("Fixes that resolved errors:");
     for (const n of fixes.sort((a, b) => b.ts - a.ts).slice(0, TABLE_FIXES))
-      out.push(`- [fix ${localDay(n.ts)} ${n.id}] ${oneLine(n.title, 140)}: ${oneLine(fixDisplay(n.body), 160)}`);
+      out.push(`- [fix ${utcDay(n.ts)} ${n.id}] ${oneLine(n.title, 140)}: ${oneLine(fixDisplay(n.body), 160)}`);
   }
   return out.join(`
 `);
@@ -2831,11 +2831,11 @@ function hookHealth() {
     return ["- hook errors: none logged"];
   const last = errors[errors.length - 1];
   const recent = errors.filter((e) => Date.now() - e.ts < RECENT_ERRORS_MS);
-  const lines = [`- hook errors: ${errors.length} logged, last ${localTime(last.ts)}`];
+  const lines = [`- hook errors: ${errors.length} logged, last ${utcTime(last.ts)}`];
   if (recent.length) {
     lines.push(`  WARNING: ${recent.length} hook error(s) in the past 7 days; recall or capture may be failing. Latest:`);
     for (const e of recent.slice(-3))
-      lines.push(`  - ${localTime(e.ts)} ${e.message.replace(/\s+/g, " ").slice(0, 200)}`);
+      lines.push(`  - ${utcTime(e.ts)} ${e.message.replace(/\s+/g, " ").slice(0, 200)}`);
     lines.push(`  Full log: ${join4(dataDir(), "error.log")}`);
   }
   return lines;

@@ -10,7 +10,7 @@ import {
   demotedNotes,
   indexRoot,
   injectedDocs,
-  localDay as day,
+  utcDay as day,
   markInjected,
   projectId,
   projectObservations,
