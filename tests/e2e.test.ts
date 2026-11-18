@@ -616,8 +616,7 @@ describe("status, history and usage", () => {
       );
     prompt(e.ROOT!, "revenue by month here");
     prompt(other, "churn in the other repo");
-    const d = new Date();
-    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const today = new Date().toISOString().slice(0, 10);
     const mine = run(e, ["history", today]).stdout;
     expect(mine).toContain("revenue by month here");
     expect(mine).not.toContain("churn in the other repo");

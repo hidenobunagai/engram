@@ -36,8 +36,8 @@ import {
   logHookError,
   noteSource,
   noteUsage,
-  localDay,
-  localTime,
+  utcDay,
+  utcTime,
   projectId,
   projectObservations,
   projectRoot,
@@ -193,7 +193,7 @@ function share(
       return "No shareable notes. Notes saved inside the team scope appear here.";
     return [
       "Shareable notes (saved inside the team scope, not shared yet):",
-      ...candidates.map((n) => `- ${n.id} [${n.kind} ${localDay(n.ts)}] ${n.title}`),
+      ...candidates.map((n) => `- ${n.id} [${n.kind} ${utcDay(n.ts)}] ${n.title}`),
       "Share one with: engram share <note-id>",
     ].join("\n");
   }
@@ -258,7 +258,7 @@ function history(pos: string[], opt: Record<string, string>): string {
       `Sessions${all ? "" : ` in ${project}`} (newest first):`,
       ...sessions.map(
         (s) =>
-          `- ${s.session.slice(0, 8)} ${localTime(s.start)} → ${localTime(s.end).slice(11)} ` +
+          `- ${s.session.slice(0, 8)} ${utcTime(s.start)} → ${utcTime(s.end).slice(11)} ` +
           `${s.records} records${s.errors ? `, ${s.errors} errors` : ""}${all ? ` [${s.project}]` : ""}` +
           (s.firstPrompt ? ` — ${s.firstPrompt.replace(/\s+/g, " ").slice(0, 100)}` : ""),
       ),
@@ -269,7 +269,7 @@ function history(pos: string[], opt: Record<string, string>): string {
   const all = pos.includes("--all");
   const where = all ? "all projects" : project;
   const recs = (all ? allObservations() : projectObservations(project))
-    .filter((o) => (byDay ? localDay(o.ts) === target : o.session.startsWith(target)))
+    .filter((o) => (byDay ? utcDay(o.ts) === target : o.session.startsWith(target)))
     .sort((a, b) => a.ts - b.ts)
     .slice(-200);
   if (!recs.length) return `Nothing recorded for "${target}" in ${where}.`;
@@ -285,7 +285,7 @@ function history(pos: string[], opt: Record<string, string>): string {
       const what = o.input.replace(/\s+/g, " ").slice(0, 160);
       const err = o.error ? ` ✗ ${o.error.replace(/\s+/g, " ").slice(0, 120)}` : "";
       const tag = all ? ` [${o.project}]` : "";
-      return `- ${localTime(o.ts).slice(11)} ${byDay ? `${o.session.slice(0, 8)} ` : ""}${o.tool}${tag}: ${what}${err}`;
+      return `- ${utcTime(o.ts).slice(11)} ${byDay ? `${o.session.slice(0, 8)} ` : ""}${o.tool}${tag}: ${what}${err}`;
     }),
   ].join("\n");
 }
@@ -319,12 +319,12 @@ function status(): string {
     ...lifecycleLines(notes, new Set(items.map((i) => i.id))),
     `- captured observations for this project: ${obs.length} (errors: ${obs.filter((o) => o.error).length})`,
     // A capture that stopped long ago while the project is in use points at dead hooks.
-    `- last capture in this project: ${obs.length ? localTime(obs.reduce((a, o) => Math.max(a, o.ts), 0)) : "never"}`,
+    `- last capture in this project: ${obs.length ? utcTime(obs.reduce((a, o) => Math.max(a, o.ts), 0)) : "never"}`,
     ...hookHealth(),
     `- capture: ${captureIgnored(cwd) ? "off (.engram-ignore at the project root)" : process.env.ENGRAM_DISABLE_CAPTURE === "1" ? "off (ENGRAM_DISABLE_CAPTURE)" : "on"}`,
     `- team scope: ${teamScope(cwd).inScope ? "in scope" : "out of scope"} (${teamScope(cwd).reason})`,
     `- team folder: ${sharedStore() || "none"}${error ? ` (${error})` : ""}`,
-    `- team snapshot: ${snap ? `${snap.items.length} items, ${localTime(snap.at)}` : "none"}`,
+    `- team snapshot: ${snap ? `${snap.items.length} items, ${utcTime(snap.at)}` : "none"}`,
     `- team stores: ${teamDirs(cwd).join(", ") || "none"}`,
     `- team items loaded: ${items.length}`,
   ];
@@ -382,7 +382,7 @@ function table(name: string): string {
   const oneLine = (s: string, max: number) => clip(s.replace(/\s+/g, " ").trim(), max);
   const out = [`engram table: ${name}`];
   out.push(
-    `- last touched: ${touched ? localTime(touched) : "never"} ` +
+    `- last touched: ${touched ? utcTime(touched) : "never"} ` +
       `(${runs.length} recorded run(s) in this project, ${runs.filter((o) => o.error).length} failed)`,
   );
   if (team.length || others.length) {
@@ -392,20 +392,20 @@ function table(name: string): string {
     for (const n of others
       .sort((a, b) => kindOrder(a.kind) - kindOrder(b.kind) || b.ts - a.ts)
       .slice(0, Math.max(0, TABLE_NOTES - team.length)))
-      out.push(`- [${n.kind} ${localDay(n.ts)} ${n.id}] ${n.title}: ${oneLine(n.body, 160)}`);
+      out.push(`- [${n.kind} ${utcDay(n.ts)} ${n.id}] ${n.title}: ${oneLine(n.body, 160)}`);
   }
   if (errors.size) {
     out.push("Most common errors:");
     for (const [line, e] of [...errors]
       .sort((a, b) => b[1].count - a[1].count || b[1].last - a[1].last)
       .slice(0, TABLE_ERRORS))
-      out.push(`- ${e.count}× ${line} (last ${localDay(e.last)})`);
+      out.push(`- ${e.count}× ${line} (last ${utcDay(e.last)})`);
   }
   if (fixes.length) {
     out.push("Fixes that resolved errors:");
     for (const n of fixes.sort((a, b) => b.ts - a.ts).slice(0, TABLE_FIXES))
       out.push(
-        `- [fix ${localDay(n.ts)} ${n.id}] ${oneLine(n.title, 140)}: ${oneLine(fixDisplay(n.body), 160)}`,
+        `- [fix ${utcDay(n.ts)} ${n.id}] ${oneLine(n.title, 140)}: ${oneLine(fixDisplay(n.body), 160)}`,
       );
   }
   return out.join("\n");
@@ -537,13 +537,13 @@ function hookHealth(): string[] {
   if (!errors.length) return ["- hook errors: none logged"];
   const last = errors[errors.length - 1];
   const recent = errors.filter((e) => Date.now() - e.ts < RECENT_ERRORS_MS);
-  const lines = [`- hook errors: ${errors.length} logged, last ${localTime(last.ts)}`];
+  const lines = [`- hook errors: ${errors.length} logged, last ${utcTime(last.ts)}`];
   if (recent.length) {
     lines.push(
       `  WARNING: ${recent.length} hook error(s) in the past 7 days; recall or capture may be failing. Latest:`,
     );
     for (const e of recent.slice(-3))
-      lines.push(`  - ${localTime(e.ts)} ${e.message.replace(/\s+/g, " ").slice(0, 200)}`);
+      lines.push(`  - ${utcTime(e.ts)} ${e.message.replace(/\s+/g, " ").slice(0, 200)}`);
     lines.push(`  Full log: ${join(dataDir(), "error.log")}`);
   }
   return lines;
